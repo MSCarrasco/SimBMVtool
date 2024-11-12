@@ -1,0 +1,99 @@
+---
+paths:
+  irf: /fefs/aswg/workspace/marie-sophie.carrasco/projects/analysis/simulation/ressources/size_200_leakage_0.2_gammaness_eff60_ebins_5pdec_diffuse
+  gammapy_catalog: /fefs/aswg/workspace/marie-sophie.carrasco/projects/dev-github/gammapy-extra/datasets/catalogs/gammacat/gammacat.fits.gz
+  output_dir: ./outputs
+  simulated_obs_dir: /fefs/aswg/workspace/marie-sophie.carrasco/projects/analysis/simulation/outputs/tests/data/datasets
+  save_name_obs: elliptical_bkg_x_0_y_0_sig_03_phi_0_e_0_xgrad_0_ygrad_0
+  save_name_suffix: delay_600_norm_100_20240830
+simulation:
+  simulate: False
+  n_run: 6       # per wobble
+  livetime: 600  # [s]
+  single_pointing: False # If true, only W1 observations are simulated
+  obs_collection_type: n_run_obs_per_wobble # two_wobble_obs, n_run_obs_per_wobble
+  t_ref: '2024-10-05 23:00:00'
+  delay: 600       # [s]
+  time_oversampling: 300 # [s] time step between subdatasets, i.e. maximum time step for background IRF evaluation
+  fov_rotation_error_limit: 1 # [deg] maximum estimated FoV rotation error before re-evaluation of the background IRF evaluation by gammapy
+  e_min: 0.5      # [TeV]
+  e_max: 10       # [TeV]
+wobble_1:
+  run: 11895
+  seed: 4
+  obs_id: '1'
+wobble_2:
+  run: 11896
+  seed: 42
+  obs_id: '2'
+source:
+  catalog_name: Crab nebula # Gammacat name
+  flux_to_0: True # Set to True for background only simulated data
+  exclusion_region:
+    shape: noexclusion # circle, 2_circle, ellipse, noexclusion
+    radius: 0 # [°]
+background:
+  spectral_model:
+    model: PowerLawNormSpectralModel
+    factor: 2.4
+    scale: 1
+    norm: 100
+    reference: 1 TeV
+    unit: sr-1 s-1 TeV-1
+  spatial_model:
+    model: GaussianSpatialModel_LinearGradient
+    lon_0: 0
+    lat_0: 0
+    lon_grad: 0
+    lat_grad: 0
+    lon_grad_variation: False
+    lat_grad_variation: False
+    sigma: 0.3
+    phi: 0
+    e: 0
+    unit: "deg"
+  maker:
+    correlation_radius: 0.08    # [deg]
+    ring:
+      internal_ring_radius: 0.1 # [deg]
+      width: 0.1                # [deg]
+    fov:
+      method: scale # scale, fit
+irf:
+  dimension: 3
+  collection: False
+  FoV_alignment: ALTAZ # ALTAZ, RADEC
+  down_factor: 10
+  offset_factor: 2
+dataset:
+  width_factor: 2.5
+  binsize: 0.02               # [deg]
+acceptance:
+  method: fit # stack,fit
+  collection: True
+  single_file_path: /fefs/aswg/workspace/ali.baktash/simulation_data/centered_full_gaussian/no_exlcusion/teststacked_exclusion_map.fits
+  energy:
+    e_min: 0.5
+    e_max: 10
+    unit: TeV
+    nbin: 3
+  offset:
+    offset_max: 1.5           # [deg]
+    nbin: 11
+  cos_zenith_binning:
+    zenith_binning: False
+    initial_cos_zenith_binning: 0.01
+    runwise_normalisation: False
+    cos_zenith_binning_method: min_livetime_per_wobble
+    cos_zenith_binning_parameter_value: 3000    # [s] if 'livetime' in method
+  fit:
+    fnc: bilinear_gaussian2d
+    bounds:
+      x_cm: [0,0]
+      y_cm: [0,0]
+      psi: [0,0]
+      #width: [0.3,0.33]
+      #length: [0.3,0.33]
+      #x_gradient: [-11,-9.99] 
+      #y_gradient: [0,0] 
+    minuit_print_level: 0
