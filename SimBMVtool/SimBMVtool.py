@@ -2039,7 +2039,8 @@ class BaseSimBMVCreator(ABC):
                             y_lat=100*profile_bias.xs((Ebin), axis=1).xs(('lon_lat'),axis=1).loc[('fov_lat', stat)]
                             ylabel=f'Bias {stat.capitalize()} [%]'
                             plot_condition = fov_is_in_3sig
-                            xlim = [-offset_edges[offset_edges >= r_3sig][0],offset_edges[offset_edges >= r_3sig][0]]
+                            if np.any(offset_edges >= r_3sig): xlim = [-offset_edges[offset_edges >= r_3sig][0],offset_edges[offset_edges >= r_3sig][0]]
+                            else: xlim = [fov_edges[0],fov_edges[-1]]
                         else:
                             y_lon=profile_out.xs((Ebin), axis=1).xs(('lon_lat'),axis=1).loc[('fov_lon', stat)]
                             y_lat=profile_out.xs((Ebin), axis=1).xs(('lon_lat'),axis=1).loc[('fov_lat', stat)]
@@ -2111,7 +2112,8 @@ class BaseSimBMVCreator(ABC):
                             y=100*profile_bias.xs((Ebin), axis=1).xs(('offset'),axis=1).loc[('fov_offset', stat)]
                             ylabel=f'Bias {stat.capitalize()} [%]'
                             plot_condition = offset_is_in_3sig
-                            xlim = [0,offset_edges[offset_edges >= r_3sig][0]]
+                            if np.any(offset_edges >= r_3sig): xlim = [0,offset_edges[offset_edges >= r_3sig][0]]
+                            else: xlim = [0,fov_edges[-1]]
                         else:
                             y=profile_out.xs((Ebin), axis=1).xs(('offset'),axis=1).loc[('fov_offset', stat)]
                             ylabel=f'{stat} [events]'
