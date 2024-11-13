@@ -25,7 +25,7 @@ from gammapy.datasets import MapDataset,MapDatasetEventSampler,Datasets,MapDatas
 from gammapy.irf import load_irf_dict_from_file, Background2D, Background3D, FoVAlignment
 from gammapy.makers import FoVBackgroundMaker,MapDatasetMaker, SafeMaskMaker, RingBackgroundMaker
 from gammapy.maps import MapAxis, WcsGeom, WcsNDMap, Map
-from regions import CircleAnnulusSkyRegion, CircleSkyRegion, SkyRegion, Regions
+from regions import CircleAnnulusSkyRegion, CircleSkyRegion, EllipseSkyRegion, SkyRegion, Regions
 
 from gammapy.maps.region.geom import RegionGeom
 from gammapy.estimators import ExcessMapEstimator
@@ -678,7 +678,7 @@ def plot_lima_maps(dataset,correlation_radius,source_pos,exclusion_region,exclus
     ax1.plot(x, p, lw=2, color="black")
     p2 = norm_stats.pdf(x, 0, 1)
     #ax.plot(x, p2, lw=2, color="green")
-    ax1.set_title(f"Background residuals map E= {emin_map:.1f} - {emax_map:.1f}")
+    ax1.set_title(f"Background residuals map\nE= {emin_map.value:.1f} - {emax_map.value:.1f} {emax_map.unit}")
     ax1.text(-2.,0.001, f'mu = {mu:3.2f}\nstd={std:3.2f}',fontsize=14, fontweight='bold')
     ax1.legend()
     ax1.set_xlabel("Significance")
@@ -1464,6 +1464,11 @@ class BaseSimBMVCreator(ABC):
         elif (self.region_shape=='circle'):
             self.exclusion_radius=self.exclu_rad * u.deg
             self.source_region = CircleSkyRegion(center=self.source_pos, radius=self.exclusion_radius)
+        elif (self.region_shape=='ellipse'):
+            self.width = self.cfg_source["exclusion_region"]["ellipse"]["width"] * u.deg
+            self.height = self.cfg_source["exclusion_region"]["ellipse"]["height"] * u.deg
+            self.angle = self.cfg_source["exclusion_region"]["ellipse"]["angle"] * u.deg
+            self.source_region = EllipseSkyRegion(center=self.source_pos, width=self.width, height=self.height, angle=self.angle)
 
         self.single_region=True # Set it to False to mask additional regions in the FoV. The example here is for Crab + Zeta Tauri
         if self.single_region:
@@ -1489,7 +1494,9 @@ class BaseSimBMVCreator(ABC):
         self.offset_axis_acceptance = MapAxis.from_bounds(0.*u.deg, self.size_fov_acc, nbin=self.nbin_offset_acc, name='offset')
         self.energy_axis_acceptance = MapAxis.from_energy_bounds(self.e_min, self.e_max, nbin=self.nbin_E_acc, name='energy')
         
-        self.Ebin_labels = [f"{ebin_min:.1f}-{ebin_max:.1f} {self.energy_axis_acceptance.unit}" for ebin_min, ebin_max in zip(self.energy_axis_acceptance.edges.value[:-1],self.energy_axis_acceptance.edges.value[1:])]
+        self.Ebin_edges=self.energy_axis_acceptance.edges
+        self.Ebin_tuples = np.array([(edge_inf.value,edge_sup.value) for edge_inf,edge_sup in zip(self.Ebin_edges[:-1],self.Ebin_edges[1:])])
+        self.Ebin_labels = [f"{ebin_min:.1f}-{ebin_max:.1f} {self.energy_axis_acceptance.unit}" for (ebin_min, ebin_max) in self.Ebin_tuples]
 
         self.Ebin_mid = self.energy_axis_acceptance.center.value.round(1)
         self.ncols = int((len(self.Ebin_mid)+1)/2)
@@ -1532,9 +1539,9 @@ class BaseSimBMVCreator(ABC):
         self.bkg_true_model = FoVBackgroundModel(dataset_name="true_model", spatial_model=bkg_spatial_model, spectral_model=self.bkg_spectral_model)
 
         # Some variables used for the custom plotting methods
-        self.axis_info_acceptance = [self.e_min,self.e_max,self.size_fov_acc.value,self.nbin_offset_acc]
-        self.axis_info_irf = [self.e_min,self.e_max,self.size_fov_irf.value,self.nbin_offset_irf]
-        self.axis_info_map = [self.e_min,self.e_max,self.size_fov_irf.value,self.nbin_offset_irf]
+        self.axis_info_acceptance = [self.e_min,self.e_max,self.size_fov_acc,self.nbin_offset_acc]
+        self.axis_info_dataset = [self.e_min,self.e_max,self.size_fov_irf,self.nbin_offset_irf]
+        self.axis_info_map = [self.e_min,self.e_max,self.size_fov_irf,self.nbin_offset_irf]
 
         # Simulation
         self.loc = EarthLocation.of_site('Roque de los Muchachos')
@@ -2154,7 +2161,7 @@ class BaseSimBMVCreator(ABC):
             plt.show()
             if fig_save_path != '': fig.savefig(fig_save_path[:-4]+f"_offset_Ebin_{'all' if (Ebin==-1) else iEbin}.png", dpi=300, transparent=False, bbox_inches='tight')    
 
-    def plot(self, data='acceptance', irf='true', residuals='none', profile='none', downsampled=True, title='', fig_save_path='', plot_hist=False) -> None:
+    def plot_model(self, data='acceptance', irf='true', residuals='none', profile='none', downsampled=True, title='', fig_save_path='', plot_hist=False) -> None:
         '''
         data types = ['acceptance', 'bkg_map']
         irf types = ['true', 'output', 'both']
@@ -2281,3 +2288,9 @@ class BaseSimBMVCreator(ABC):
                             fontsize=10, verticalalignment='center', bbox=props)
                 plt.show()
                 if fig_save_path != '': fig.savefig(fig_save_path[:-4]+'_distrib.png', dpi=300, transparent=False, bbox_inches='tight')
+
+    def plot_skymaps(self, bkg_method='ring', axis_info_dataset=None, axis_info_map=None):
+        if axis_info_dataset is None: axis_info_dataset = self.axis_info_dataset
+        if axis_info_map is None: axis_info_map = self.axis_info_map
+        stacked_dataset = self.get_stacked_dataset(bkg_method=bkg_method, axis_info=axis_info_dataset)
+        plot_lima_maps(stacked_dataset, self.ring_bkg_param[0],self.source_pos,self.exclude_regions,self.exclu_rad,'',None,axis_info_map[:-1],cutout=True)

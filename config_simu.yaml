@@ -7,14 +7,14 @@ paths:
   save_name_obs: gaussian_background
   save_name_suffix: 20_mn_consecutive_runs
 simulation:
-  n_run: 2       # per wobble
-  livetime: 1200  # [s]
-  single_pointing: False # If true, only W1 observations are simulated
-  obs_collection_type: n_run_obs_per_wobble # two_wobble_obs, n_run_obs_per_wobble
+  n_run: 2                                    # per wobble
+  livetime: 1200                              # [s]
+  single_pointing: False                      # If true, only W1 observations are simulated
+  obs_collection_type: n_run_obs_per_wobble   # two_wobble_obs, n_run_obs_per_wobble
   t_ref: '2024-10-05 23:00:00'
-  delay: 1200       # [s]
-  time_oversampling: 100 # [s] time step between subdatasets, i.e. maximum time step for background IRF evaluation
-  fov_rotation_error_limit: 1 # [deg] maximum estimated FoV rotation error before re-evaluation of the background IRF evaluation by gammapy
+  delay: 1200                                 # [s]
+  time_oversampling: 100                      # [s] time step between subdatasets, i.e. maximum time step for background IRF evaluation
+  fov_rotation_error_limit: 1                 # [deg] maximum estimated FoV rotation error before re-evaluation of the background IRF evaluation by gammapy
   e_min: 0.5      # [TeV]
   e_max: 10       # [TeV]
 wobble_1:
@@ -29,8 +29,12 @@ source:
   catalog_name: Crab nebula # Gammacat name
   flux_to_0: False # Set to True for background only simulated data
   exclusion_region:
-    shape: circle # circle, 2_circle, ellipse, noexclusion
-    radius: 0.3 # [°]
+    shape: ellipse                             # circle, 2_circle, ellipse, noexclusion
+    radius: 0.35                              # [°]
+    ellipse:
+      width: 0.2                              # [°]
+      height: 0.6                             # [°]
+      angle: 45                               # [°]
 background:
   spectral_model:
     model: PowerLawNormSpectralModel
