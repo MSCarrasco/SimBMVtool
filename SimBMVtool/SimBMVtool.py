@@ -1,4 +1,4 @@
-from gammapy.data import Observations, PointingMode
+from gammapy.data import Observations, PointingMode, ObservationMetaData
 import math
 import numpy as np
 import astropy.units as u
@@ -25,8 +25,7 @@ from gammapy.datasets import MapDataset,MapDatasetEventSampler,Datasets,MapDatas
 from gammapy.irf import load_irf_dict_from_file, Background2D, Background3D, FoVAlignment
 from gammapy.makers import FoVBackgroundMaker,MapDatasetMaker, SafeMaskMaker, RingBackgroundMaker
 from gammapy.maps import MapAxis, WcsGeom, WcsNDMap, Map
-from regions import CircleAnnulusSkyRegion, CircleSkyRegion, EllipseSkyRegion, SkyRegion, Regions
-
+from regions import CircleAnnulusSkyRegion, CircleSkyRegion, EllipseSkyRegion
 from gammapy.maps.region.geom import RegionGeom
 from gammapy.estimators import ExcessMapEstimator
 from gammapy.datasets import Datasets, MapDataset, MapDatasetOnOff
@@ -45,7 +44,7 @@ from gammapy.modeling.models import (
     LogParabolaSpectralModel,
     SkyModel,
 )
-from gammapy.catalog import SourceCatalogGammaCat
+from gammapy.catalog import SourceCatalogGammaCat, SourceCatalogObject
 
 from scipy.stats import norm as norm_stats
 from gammapy.stats import CashCountsStatistic
@@ -53,7 +52,6 @@ from gammapy.modeling import Parameter, Parameters
 from gammapy.utils.compat import COPY_IF_NEEDED
 
 from itertools import product
-from gammapy.catalog import SourceCatalogGammaCat
 from acceptance_modelisation import RadialAcceptanceMapCreator, Grid3DAcceptanceMapCreator, BackgroundCollectionZenith
 from abc import ABC, abstractmethod
 from typing import Tuple, List, Optional, Union
@@ -1433,6 +1431,7 @@ class BaseSimBMVCreator(ABC):
         self.config = config
         self.config_path = config_path
         self.cfg_paths = config["paths"]
+        self.cfg_data = self.config["data"]
         self.cfg_simulation = config["simulation"]
         self.cfg_wobble_1 = config["wobble_1"]
         self.cfg_wobble_2 = config["wobble_2"]
@@ -1443,6 +1442,7 @@ class BaseSimBMVCreator(ABC):
         self.cfg_acceptance = config["acceptance"]
 
         # Paths
+        self.output_dir = self.cfg_paths["output_dir"]
         self.simulated_obs_dir = self.cfg_paths["simulated_obs_dir"]
         self.save_name_obs = self.cfg_paths["save_name_obs"]
         self.save_name_suffix = self.cfg_paths["save_name_suffix"]
@@ -1450,32 +1450,52 @@ class BaseSimBMVCreator(ABC):
         self.run_dir=self.cfg_paths["irf"] # path to files to get the irfs used for simulation
         self.path_data=self.cfg_paths["irf"] # path to files to get run information used for simulation
 
+        # Data
+        self.real_data = self.cfg_data["real"]
+        self.run_list = np.array(self.cfg_data["run_list"])
+        self.all_obs_ids = np.array([])
+
         # Source
         self.source_name=self.cfg_source["catalog_name"]
-        self.source = SourceCatalogGammaCat(self.cfg_paths["gammapy_catalog"])[self.source_name]
-        self.source_pos=self.source.position
+        catalog = SourceCatalogGammaCat(self.cfg_paths["gammapy_catalog"])
+        if self.source_name in catalog.table['common_name']:
+            self.source = catalog[self.source_name]
+            self.source_pos=self.source.position
+        else:
+            self.source = SourceCatalogObject(data={'Source_Name':self.source_name,'RA': self.cfg_source["coordinates"]["ra"]*u.deg, 'DEC':self.cfg_source["coordinates"]["dec"]})
+            self.source_pos=self.source.position
 
         self.region_shape = self.cfg_source["exclusion_region"]["shape"]
-        self.exclu_rad = self.cfg_source["exclusion_region"]["radius"]
+        self.source_region = []
 
         if (self.region_shape=='noexclusion'):
             # Parts of the code don't work without an exlcusion region, so a dummy one is declared at the origin of the ICRS frame (and CircleSkyRegion object needs a non-zero value for the radius) 
-            self.source_region = CircleSkyRegion(center=SkyCoord(ra=0. * u.deg, dec=0. * u.deg, frame='icrs'),radius=1*u.deg)
-        elif (self.region_shape=='circle'):
-            self.exclusion_radius=self.exclu_rad * u.deg
-            self.source_region = CircleSkyRegion(center=self.source_pos, radius=self.exclusion_radius)
+            self.source_region.append(CircleSkyRegion(center=SkyCoord(ra=0. * u.deg, dec=0. * u.deg, frame='icrs'),radius=1*u.deg))
+        
+        elif (self.region_shape=='n_circles'):
+            self.n_circles = len(self.cfg_source["exclusion_region"]["n_circles"])
+            for i in range(self.n_circles):
+                cfg_circle = self.cfg_source["exclusion_region"]["n_circles"][f"circle_{i+1}"]
+                circle_pos = SkyCoord(ra=cfg_circle["ra"]*u.deg, dec=cfg_circle["dec"]*u.deg, frame='icrs')
+                circle_rad = cfg_circle["radius"] * u.deg
+                self.source_region.append(CircleSkyRegion(center=circle_pos, radius=circle_rad))
+                if i == 0:
+                    self.exclusion_radius=circle_rad
+                    self.exclu_rad = circle_rad.to_value(u.deg)
+        
         elif (self.region_shape=='ellipse'):
             self.width = self.cfg_source["exclusion_region"]["ellipse"]["width"] * u.deg
             self.height = self.cfg_source["exclusion_region"]["ellipse"]["height"] * u.deg
             self.angle = self.cfg_source["exclusion_region"]["ellipse"]["angle"] * u.deg
-            self.source_region = EllipseSkyRegion(center=self.source_pos, width=self.width, height=self.height, angle=self.angle)
+            self.source_region = [EllipseSkyRegion(center=self.source_pos, width=self.width, height=self.height, angle=self.angle)]
 
         self.single_region=True # Set it to False to mask additional regions in the FoV. The example here is for Crab + Zeta Tauri
-        if self.single_region:
-            self.exclude_regions=[self.source_region] # The modelisation tool needs an array of regions to work
-        else:
+        self.exclude_regions=[]
+        for region in self.source_region: self.exclude_regions.append(region)
+        if not self.single_region:
+            # TO-DO: catalog of classic regions to mask. Here it is an example for masking zeta tauri on crab observations
             zeta_region = CircleSkyRegion(center=SkyCoord(ra=84.4125*u.deg, dec=21.1425*u.deg), radius=self.exclusion_radius)
-            self.exclude_regions = [self.source_region, zeta_region]
+            self.exclude_regions.append(zeta_region)
 
         self.source_info = [self.source_name,self.source_pos,self.source_region]
         self.flux_to_0 = self.cfg_source["flux_to_0"]
@@ -1584,8 +1604,8 @@ class BaseSimBMVCreator(ABC):
         self.multiple_simulation_subdir = False # TO-DO adapt for multiple subdirectories
         self.save_path_simu_joined = ''
         if self.multiple_simulation_subdir: self.save_path_simu = self.save_path_simu_joined
-        else: self.save_path_simu = f"{self.simulated_obs_dir}/{self.save_name_obs}/{self.obs_collection_type}"+f"_{self.save_name_suffix}"*(self.save_name_suffix is not None)
-
+        elif not self.real_data: self.save_path_simu = f"{self.simulated_obs_dir}/{self.save_name_obs}/{self.obs_collection_type}"+f"_{self.save_name_suffix}"*(self.save_name_suffix is not None)
+        else: self.save_path_simu = self.cfg_data['save_path_data']
         # Acceptance parameters
         self.method = self.cfg_acceptance["method"]
 
@@ -1603,10 +1623,15 @@ class BaseSimBMVCreator(ABC):
         self.fit_bounds=self.cfg_acceptance["fit"]["bounds"]
 
         # Output files
-        self.end_name=f'{self.bkg_dim}D_{self.region_shape}_Ebins_{self.nbin_E_acc}_offsetbins_{self.nbin_offset_acc}_offset_max_{self.size_fov_acc.value:.1f}'+f'_{self.cos_zenith_binning_parameter_value}sperW'*self.zenith_binning+f'_exclurad_0{self.exclu_rad}'*((self.exclu_rad != 0) & (self.region_shape != 'noexclusion'))
+        region_shape = self.region_shape if self.region_shape != "n_circles" else f"{self.n_circles}_circle{'s'*self.n_circles > 1}"
+        self.end_name=f'{self.bkg_dim}D_{region_shape}_Ebins_{self.nbin_E_acc}_offsetbins_{self.nbin_offset_acc}_offset_max_{self.size_fov_acc.value:.1f}'+f'_{self.cos_zenith_binning_parameter_value}sperW'*self.zenith_binning+f'_exclurad_0{self.exclu_rad}'*((self.exclu_rad != 0) & (self.region_shape != 'noexclusion'))
         self.index_suffix = f"_with_bkg_{self.bkg_dim}d_{self.method}_{self.end_name[3:]}"
-        self.acceptance_files_dir=f"{self.save_path_simu}/{self.end_name}/{self.method}/acceptances"
-        self.plots_dir=f"{self.save_path_simu}/{self.end_name}/{self.method}/plots"
+        if self.real_data:
+            self.acceptance_files_dir = f"{self.output_dir}/{self.save_name_obs}/{self.end_name}/{self.method}/acceptances"
+            self.plots_dir=f"{self.output_dir}/{self.save_name_obs}/{self.end_name}/{self.method}/plots"
+        else:
+            self.acceptance_files_dir=f"{self.save_path_simu}/{self.end_name}/{self.method}/acceptances"
+            self.plots_dir=f"{self.save_path_simu}/{self.end_name}/{self.method}/plots"
         
         Path(self.acceptance_files_dir).mkdir(parents=True, exist_ok=True)
         Path(self.plots_dir).mkdir(parents=True, exist_ok=True)
@@ -1616,8 +1641,8 @@ class BaseSimBMVCreator(ABC):
         if config_path is not None: self.init_config(config_path)
         
         if self.true_collection:
-            self.bkg_true_irf_collection = BackgroundCollectionZenith()
-            self.bkg_true_down_irf_collection = BackgroundCollectionZenith()
+            self.bkg_true_irf_collection = {}
+            self.bkg_true_down_irf_collection = {}
             tmp_config = self.config
             self.lon_grad_step = np.diff(np.linspace(0,abs(self.lon_grad), self.n_run))[0]
 
@@ -1639,8 +1664,13 @@ class BaseSimBMVCreator(ABC):
         if config_path is not None: self.init_config(config_path)
 
         if self.out_collection:
-            self.bkg_output_irf_collection = BackgroundCollectionZenith()
-            for irun in range(self.n_run): self.bkg_output_irf_collection[irun+1] = Background3D.read(f'{self.acceptance_files_dir}/acceptance_obs-{irun+1}.fits')
+            self.bkg_output_irf_collection = {}
+
+            self.obs_ids = self.all_obs_ids if self.run_list.shape[0] == 0 else self.run_list
+            if self.real_data:
+                for iobs,obs_id in enumerate(self.obs_ids): self.bkg_output_irf_collection[iobs] = Background3D.read(f'{self.acceptance_files_dir}/acceptance_obs-{obs_id}.fits')
+            else:
+                for irun in range(self.n_run): self.bkg_output_irf_collection[irun+1] = Background3D.read(f'{self.acceptance_files_dir}/acceptance_obs-{irun+1}.fits')
         else:
             self.bkg_output_irf = Background3D.read(self.single_file_path)
     
@@ -1682,7 +1712,8 @@ class BaseSimBMVCreator(ABC):
         
         if not self.multiple_simulation_subdir:
             if from_index: self.pattern = self.index_suffix
-            else: self.pattern = f"obs_*{self.save_name_obs}.fits"
+            elif not self.real_data: self.pattern = f"obs_*{self.save_name_obs}.fits"
+            else: self.pattern = 'dl3_LST-1.Run*.fits'
             print(f"Obs collection loading pattern: {self.pattern}")
             self.data_store, self.obs_collection = get_obs_collection(self.save_path_simu,self.pattern,self.multiple_simulation_subdir,from_index=from_index,with_datastore=True)
             self.obs_table = self.data_store.obs_table
@@ -1691,12 +1722,35 @@ class BaseSimBMVCreator(ABC):
             print("Available sources: ", self.all_sources)
             print(f"{len(self.all_obs_ids)} available runs: ",self.all_obs_ids)
             self.tot_livetime_simu = 2*self.n_run*self.livetime_simu*u.s
+
+            self.obs_ids = self.all_obs_ids if self.run_list.shape[0] == 0 else self.run_list
+            if self.run_list.shape[0] != 0: 
+                self.obs_collection = self.data_store.get_observations(self.obs_ids, required_irf=['aeff', 'edisp'])
+                self.obs_table = self.data_store.obs_table.select_obs_id(self.obs_ids)
+                print(f"{len(self.obs_ids)} selected runs: ",self.obs_ids)
+            else: print("All runs selected")
+            
+            if self.real_data:
+                # Add telescope position to observations
+                for iobs in range(len(self.obs_collection)):
+                    meta_dict = self.obs_collection[iobs].events.table.meta
+                    meta_dict.__setitem__('GEOLON',str(self.loc.lon.value))
+                    meta_dict.__setitem__('GEOLAT',str(self.loc.lat.value))
+                    meta_dict.__setitem__('GEOALT',str(self.loc.height.to_value(u.m)))
+                    meta_dict.__setitem__('deadtime_fraction',str(1-meta_dict['DEADC']))
+                    self.obs_collection[iobs]._meta = ObservationMetaData.from_header(meta_dict)
+                    self.obs_collection[iobs]._location = self.loc
+                    self.obs_collection[iobs].pointing._location = self.loc
+                    # self.obs_collection[iobs].obs_info['observatory_earth_location'] = self.loc # <- modifié pour être accessible à l'intérieur de la méthode qui récupère le pointé
+
+
         else:
             self.pattern = f"{self.obs_collection_type}_{self.save_name_suffix[:-8]}*/obs_*{self.save_name_obs}.fits" # Change pattern according to your sub directories
             self.obs_collection = get_obs_collection(self.simulated_obs_dir,self.pattern,self.multiple_simulation_subdir,with_datastore=False)
             self.all_obs_ids = np.arange(1,len(self.obs_collection)+1,1)
             self.tot_livetime_simu = 2*len(self.obs_collection)*self.livetime_simu*u.s
-        print(f"Total simulated livetime: {self.tot_livetime_simu.to(u.h):.1f}")
+        self.total_livetime = sum([obs.observation_live_time_duration for obs in self.obs_collection])
+        print(f"Total livetime: {self.total_livetime.to(u.h):.1f}")
     
     def do_simulation(self, config_path=None):
         if config_path is not None: self.init_config(config_path)
@@ -1759,6 +1813,7 @@ class BaseSimBMVCreator(ABC):
         if config_path is not None: self.init_config(config_path)
 
         self.load_observation_collection()
+
         if self.bkg_dim==2:
             acceptance_model_creator = RadialAcceptanceMapCreator(self.energy_axis_acceptance,
                                                                 self.offset_axis_acceptance,
@@ -1787,7 +1842,7 @@ class BaseSimBMVCreator(ABC):
             if 'bkg' in self.data_store_out.hdu_table['HDU_TYPE']:
                 self.data_store_out.hdu_table.remove_rows(self.data_store_out.hdu_table['HDU_TYPE']=='bkg')
 
-            for i in range(len(self.all_obs_ids)):
+            for i in range(len(self.obs_ids)):
                 obs_id=self.all_obs_ids[i]
                 hdu_acceptance = acceptance_model[obs_id].to_table_hdu()
                 hdu_acceptance.writeto(f'{self.acceptance_files_dir}/acceptance_obs-{obs_id}.fits', overwrite=True)
@@ -2288,6 +2343,15 @@ class BaseSimBMVCreator(ABC):
                             fontsize=10, verticalalignment='center', bbox=props)
                 plt.show()
                 if fig_save_path != '': fig.savefig(fig_save_path[:-4]+'_distrib.png', dpi=300, transparent=False, bbox_inches='tight')
+    
+    def plot_exclusion_mask(self):
+        geom=get_geom(None,self.axis_info_dataset,self.run_info_W1)
+        geom_image = geom.to_image().to_cube([self.energy_axis_irf.squash()])
+
+        # Make the exclusion mask
+        exclusion_mask = geom_image.region_mask(self.exclude_regions, inside=False)
+        exclusion_mask.cutout(self.source_pos, self.size_fov_acc).plot()
+        plt.show()
 
     def plot_skymaps(self, bkg_method='ring', axis_info_dataset=None, axis_info_map=None):
         if axis_info_dataset is None: axis_info_dataset = self.axis_info_dataset
