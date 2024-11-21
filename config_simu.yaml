@@ -6,6 +6,10 @@ paths:
   simulated_obs_dir: ../outputs_dev/datasets
   save_name_obs: gaussian_background
   save_name_suffix: 20_mn_consecutive_runs
+data:
+  real: False
+  save_path_data: /fefs/aswg/workspace/marie-sophie.carrasco/projects/analysis/simulation/ressources/size_200_leakage_0.2_gammaness_eff60_ebins_5pdec_diffuse
+  run_list: [] # None, array of obs_ids
 simulation:
   n_run: 2                                    # per wobble
   livetime: 1200                              # [s]
@@ -26,11 +30,18 @@ wobble_2:
   seed: 42
   obs_id: '2'
 source:
-  catalog_name: Crab nebula # Gammacat name
+  catalog_name: Crab nebula # Gammacat name. If not found, will use coordinates given in config
+  coordinates:
+    ra: 83.63308
+    dec: 22.0145
   flux_to_0: False # Set to True for background only simulated data
   exclusion_region:
-    shape: ellipse                             # circle, 2_circle, ellipse, noexclusion
-    radius: 0.35                              # [°]
+    shape: n_circles # n_circles, ellipse, noexclusion
+    n_circles:
+      circle_1:       
+        radius: 0.3
+        ra: 83.63308
+        dec: 22.0145
     ellipse:
       width: 0.2                              # [°]
       height: 0.6                             # [°]
