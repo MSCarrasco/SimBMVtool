@@ -974,7 +974,7 @@ def get_obs_collection(dir_path,pattern,multiple_simulation_subdir=False,from_in
             data_store = DataStore.from_dir(f"{dir_path}",hdu_table_filename=f'hdu-index{pattern}.fits.gz',obs_table_filename=f'obs-index{pattern}.fits.gz')
         else:
             data_store = DataStore.from_events_files(paths)
-        obs_collection = data_store.get_observations()
+        obs_collection = data_store.get_observations(required_irf='all-optional')
     else:
         obs_collection = Observations()
         for path in paths:
@@ -1454,6 +1454,9 @@ class BaseSimBMVCreator(ABC):
         self.real_data = self.cfg_data["real"]
         self.run_list = np.array(self.cfg_data["run_list"])
         self.all_obs_ids = np.array([])
+        self.obs_pattern = self.cfg_data["obs_pattern"]
+        self.cos_zenith_bin_edges = np.flip(self.cfg_data["cos_zenith_bin_edges"])
+        self.cos_zenith_bin_centers = np.flip(self.cfg_data["cos_zenith_bin_centers"])
 
         # Source
         self.source_name=self.cfg_source["catalog_name"]
@@ -1713,10 +1716,17 @@ class BaseSimBMVCreator(ABC):
         if not self.multiple_simulation_subdir:
             if from_index: self.pattern = self.index_suffix
             elif not self.real_data: self.pattern = f"obs_*{self.save_name_obs}.fits"
-            else: self.pattern = 'dl3_LST-1.Run*.fits'
+            else: self.pattern = self.obs_pattern
             print(f"Obs collection loading pattern: {self.pattern}")
             self.data_store, self.obs_collection = get_obs_collection(self.save_path_simu,self.pattern,self.multiple_simulation_subdir,from_index=from_index,with_datastore=True)
             self.obs_table = self.data_store.obs_table
+            
+            # Save the new data store for future use
+            if not pathlib.Path(f"{self.save_path_simu}/hdu-index.fits.gz").exists(): 
+                self.data_store.hdu_table.write(f"{self.save_path_simu}/hdu-index.fits.gz",format="fits")
+            if not pathlib.Path(f"{self.save_path_simu}/obs-index.fits.gz").exists(): 
+                self.data_store.obs_table.write(f"{self.save_path_simu}/obs-index.fits.gz",format="fits")
+
             self.all_sources = np.unique(self.data_store.obs_table["OBJECT"])
             self.all_obs_ids = np.array(self.obs_table["OBS_ID"].data)
             print("Available sources: ", self.all_sources)
@@ -1743,13 +1753,13 @@ class BaseSimBMVCreator(ABC):
                     self.obs_collection[iobs].pointing._location = self.loc
                     # self.obs_collection[iobs].obs_info['observatory_earth_location'] = self.loc # <- modifié pour être accessible à l'intérieur de la méthode qui récupère le pointé
 
-
         else:
             self.pattern = f"{self.obs_collection_type}_{self.save_name_suffix[:-8]}*/obs_*{self.save_name_obs}.fits" # Change pattern according to your sub directories
             self.obs_collection = get_obs_collection(self.simulated_obs_dir,self.pattern,self.multiple_simulation_subdir,with_datastore=False)
             self.all_obs_ids = np.arange(1,len(self.obs_collection)+1,1)
             self.tot_livetime_simu = 2*len(self.obs_collection)*self.livetime_simu*u.s
         self.total_livetime = sum([obs.observation_live_time_duration for obs in self.obs_collection])
+        if not isinstance(self.total_livetime, u.Quantity): self.total_livetime *= u.s
         print(f"Total livetime: {self.total_livetime.to(u.h):.1f}")
     
     def do_simulation(self, config_path=None):
@@ -2216,14 +2226,20 @@ class BaseSimBMVCreator(ABC):
             plt.show()
             if fig_save_path != '': fig.savefig(fig_save_path[:-4]+f"_offset_Ebin_{'all' if (Ebin==-1) else iEbin}.png", dpi=300, transparent=False, bbox_inches='tight')    
 
-    def create_zenith_binned_collections(self, collections=["output", "observation"], cos_zenith_bin_edges = np.flip([-0.0, 0.32, 0.34, 0.37, 0.38, 0.4, 0.42, 0.44, 0.46, 0.48, 0.5, 0.53, 1.0]), cos_zenith_bin_centers =  np.flip([0.3, 0.33, 0.36, 0.37, 0.39, 0.41, 0.43, 0.45, 0.47, 0.49, 0.52, 0.55])):
+    def create_zenith_binned_collections(self, collections=["output", "observation"], zenith_bins='auto'):
         '''Initialise zenith binned collections: observations and models
-        List the collections you want binned with: collections = ["true", "output", "observation"] 
+        collections = ["true", "output", "observation"]: List of the collections you want binned with
+        zenith_bins = 'auto', 'config'
         Observations need to be loaded previously'''
-        self.cos_zenith_bin_edges = cos_zenith_bin_edges
-        self.cos_zenith_bin_centers = cos_zenith_bin_centers
+        
         self.cos_zenith_observations = np.array(
                     [np.cos(obs.get_pointing_altaz(obs.tmid).zen) for obs in self.obs_collection])
+        
+        if zenith_bins=='auto':
+            cos_min, cos_max = self.cos_zenith_observations.min(), self.cos_zenith_observations.max()
+            self.cos_zenith_bin_edges = np.flip(np.linspace(cos_min, cos_max, 5))
+            self.cos_zenith_bin_centers = np.flip(self.cos_zenith_bin_edges[:-1] + 0.5*(self.cos_zenith_bin_edges[1:]-self.cos_zenith_bin_edges[:-1]))
+
         i_collection_array = np.arange(0,len(self.obs_ids))
         
         self.obs_in_coszd_bin = []
@@ -2395,13 +2411,13 @@ class BaseSimBMVCreator(ABC):
                 plt.show()
                 if fig_save_path != '': fig.savefig(fig_save_path[:-4]+'_distrib.png', dpi=300, transparent=False, bbox_inches='tight')
     
-    def plot_zenith_binned_model(self, data='acceptance', irf='output', i_bin=-1, residuals='none', profile='none', fig_save_path='') -> None:
+    def plot_zenith_binned_model(self, data='acceptance', irf='output', i_bin=-1, zenith_bins='auto', residuals='none', profile='none', fig_save_path='') -> None:
         '''Create a zenith binned collection and plot model data
         By default all zenith bins are plotted with i_bin == -1
         Set it to bin index value to plot a single bin'''
         plot_all_bins = (i_bin ==-1)
         collections = ["true", "output"] if irf == "both" else [irf]
-        self.create_zenith_binned_collections(collections=collections)
+        self.create_zenith_binned_collections(collections=collections, zenith_bins=zenith_bins)
         for icos,cos_center in enumerate(self.cos_zenith_bin_centers):
             if plot_all_bins or (icos == i_bin):
                 zd_bin_center = np.rad2deg(np.arccos(cos_center))
