@@ -1623,8 +1623,8 @@ class BaseSimBMVCreator(ABC):
         self.fit_bounds=self.cfg_acceptance["fit"]["bounds"]
 
         # Output files
-        region_shape = self.region_shape if self.region_shape != "n_circles" else f"{self.n_circles}_circle{'s'*self.n_circles > 1}"
-        self.end_name=f'{self.bkg_dim}D_{region_shape}_Ebins_{self.nbin_E_acc}_offsetbins_{self.nbin_offset_acc}_offset_max_{self.size_fov_acc.value:.1f}'+f'_{self.cos_zenith_binning_parameter_value}sperW'*self.zenith_binning+f'_exclurad_0{self.exclu_rad}'*((self.exclu_rad != 0) & (self.region_shape != 'noexclusion'))
+        region_shape = self.region_shape if self.region_shape != "n_circles" else f"{self.n_circles}_circle{'s'*(self.n_circles > 1)}"
+        self.end_name=f'{self.bkg_dim}D_{region_shape}_Ebins_{self.nbin_E_acc}_offsetbins_{self.nbin_offset_acc}_offset_max_{self.size_fov_acc.value:.1f}'+f'_{self.cos_zenith_binning_parameter_value}sperW'*self.zenith_binning+f'_exclurad_{self.exclu_rad}'*((self.exclu_rad != 0) & (self.region_shape != 'noexclusion'))
         self.index_suffix = f"_with_bkg_{self.bkg_dim}d_{self.method}_{self.end_name[3:]}"
         if self.real_data:
             self.acceptance_files_dir = f"{self.output_dir}/{self.save_name_obs}/{self.end_name}/{self.method}/acceptances"
@@ -2216,7 +2216,46 @@ class BaseSimBMVCreator(ABC):
             plt.show()
             if fig_save_path != '': fig.savefig(fig_save_path[:-4]+f"_offset_Ebin_{'all' if (Ebin==-1) else iEbin}.png", dpi=300, transparent=False, bbox_inches='tight')    
 
-    def plot_model(self, data='acceptance', irf='true', residuals='none', profile='none', downsampled=True, title='', fig_save_path='', plot_hist=False) -> None:
+    def create_zenith_binned_collections(self, collections=["output", "observation"], cos_zenith_bin_edges = np.flip([-0.0, 0.32, 0.34, 0.37, 0.38, 0.4, 0.42, 0.44, 0.46, 0.48, 0.5, 0.53, 1.0]), cos_zenith_bin_centers =  np.flip([0.3, 0.33, 0.36, 0.37, 0.39, 0.41, 0.43, 0.45, 0.47, 0.49, 0.52, 0.55])):
+        '''Initialise zenith binned collections: observations and models
+        List the collections you want binned with: collections = ["true", "output", "observation"] 
+        Observations need to be loaded previously'''
+        self.cos_zenith_bin_edges = cos_zenith_bin_edges
+        self.cos_zenith_bin_centers = cos_zenith_bin_centers
+        self.cos_zenith_observations = np.array(
+                    [np.cos(obs.get_pointing_altaz(obs.tmid).zen) for obs in self.obs_collection])
+        i_collection_array = np.arange(0,len(self.obs_ids))
+        
+        self.obs_in_coszd_bin = []
+        values_true = []
+        values_output = []
+        values_obs = []
+
+        for cos_max,cos_min,(icos,cos_center) in zip(self.cos_zenith_bin_edges[:-1],self.cos_zenith_bin_edges[1:],enumerate(self.cos_zenith_bin_centers)):
+            is_in_coszd_bin = np.where((self.cos_zenith_observations >= cos_min) & (self.cos_zenith_observations < cos_max))
+            self.obs_in_coszd_bin.append(self.obs_ids[is_in_coszd_bin])
+            iobs_in_coszd_bin = i_collection_array[np.where((self.cos_zenith_observations >= cos_min) & (self.cos_zenith_observations < cos_max))]
+            collection_true = []
+            collection_output = []
+            collection_obs = Observations()
+            for iobs in iobs_in_coszd_bin:
+                if "true" in collections: 
+                    collection_true.append(self.bkg_true_down_irf_collection[iobs])
+                    if iobs == iobs_in_coszd_bin[-1]: 
+                        values_true.append(collection_true)
+                        if cos_center == self.cos_zenith_bin_centers[-1]: self.zenith_binned_bkg_true_down_irf_collection = dict(zip(self.cos_zenith_bin_centers,values_true))
+                if "output" in collections: 
+                    collection_output.append(self.bkg_output_irf_collection[iobs])
+                    if iobs == iobs_in_coszd_bin[-1]:
+                        values_output.append(collection_output) 
+                        if cos_center == self.cos_zenith_bin_centers[-1]: self.zenith_binned_bkg_output_irf_collection = dict(zip(self.cos_zenith_bin_centers,values_output))
+                if "observation" in collections:
+                    collection_obs.append(self.obs_collection[int(iobs)])
+                    if iobs == iobs_in_coszd_bin[-1]: 
+                        values_obs.append(collection_obs)  
+                        if cos_center == self.cos_zenith_bin_centers[-1]: self.zenith_binned_obs_collection = dict(zip(self.cos_zenith_bin_centers,values_obs))
+
+    def plot_model(self, data='acceptance', irf='true', residuals='none', profile='none', downsampled=True, i_irf=1, zenith_binned=False, title='', fig_save_path='', plot_hist=False) -> None:
         '''
         data types = ['acceptance', 'bkg_map']
         irf types = ['true', 'output', 'both']
@@ -2228,14 +2267,26 @@ class BaseSimBMVCreator(ABC):
         fov_max = self.size_fov_acc.to_value(u.deg)
         fov_lim = [-fov_max,fov_max]
         fov_bin_edges = np.linspace(-fov_max,fov_max,7)
-        
+
         # TO-DO: chose which irf you want to to compare instead of first one by default
-        if (irf == 'true') or (irf == 'both'): 
-            if self.true_collection: true = self.bkg_true_down_irf_collection[1]
-            else: true = self.bkg_true_down_irf
+        if (irf == 'true') or (irf == 'both'):
+            if zenith_binned:
+                for i, model in enumerate(self.zenith_binned_bkg_true_down_irf_collection[i_irf]):
+                    if i==0: true = self.zenith_binned_bkg_true_down_irf_collection[i_irf][0]
+                    else: true.data += model.data
+                true.data /= (i+1)
+            else: 
+                if self.true_collection: true = self.bkg_true_down_irf_collection[i_irf]
+                else: true = self.bkg_true_down_irf
         if (irf == 'output') or (irf == 'both'): 
-            if self.out_collection: out = self.bkg_output_irf_collection[1]
-            else: out = self.bkg_output_irf
+            if zenith_binned:
+                for i, model in enumerate(self.zenith_binned_bkg_output_irf_collection[i_irf]):
+                    if i==0: out = self.zenith_binned_bkg_output_irf_collection[i_irf][0]
+                    else: out.data += model.data
+                out.data /= (i+1)
+            else: 
+                if self.out_collection: out = self.bkg_output_irf_collection[i_irf]
+                else: out = self.bkg_output_irf
         
         radec_map = (data == 'bkg_map')
         if radec_map:            
@@ -2344,6 +2395,21 @@ class BaseSimBMVCreator(ABC):
                 plt.show()
                 if fig_save_path != '': fig.savefig(fig_save_path[:-4]+'_distrib.png', dpi=300, transparent=False, bbox_inches='tight')
     
+    def plot_zenith_binned_model(self, data='acceptance', irf='output', i_bin=-1, residuals='none', profile='none', fig_save_path='') -> None:
+        '''Create a zenith binned collection and plot model data
+        By default all zenith bins are plotted with i_bin == -1
+        Set it to bin index value to plot a single bin'''
+        plot_all_bins = (i_bin ==-1)
+        collections = ["true", "output"] if irf == "both" else [irf]
+        self.create_zenith_binned_collections(collections=collections)
+        for icos,cos_center in enumerate(self.cos_zenith_bin_centers):
+            if plot_all_bins or (icos == i_bin):
+                zd_bin_center = np.rad2deg(np.arccos(cos_center))
+                title = f"Zenith binned averaged model data\nzd = {zd_bin_center:.1f}°, {self.obs_in_coszd_bin[icos].shape[0]} runs"
+                if fig_save_path == '': fig_save_path=f"{self.plots_dir}/averaged_binned_acceptance_zd_{zd_bin_center:.0f}.png"
+                else:  fig_save_path=f"{fig_save_path[:-4]}_{zd_bin_center:.0f}.png"
+                self.plot_model(data=data, irf=irf, residuals=residuals, profile=profile, downsampled=True, i_irf=cos_center, zenith_binned=True, title=title, fig_save_path=fig_save_path, plot_hist=False)
+
     def plot_exclusion_mask(self):
         geom=get_geom(None,self.axis_info_dataset,self.run_info_W1)
         geom_image = geom.to_image().to_cube([self.energy_axis_irf.squash()])
