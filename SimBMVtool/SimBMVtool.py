@@ -1413,6 +1413,101 @@ def compute_residuals(out, true, residuals='diff/true',res_lim_for_nan=0.9) -> n
         res_arr[iEbin,:,:] += res
     return res_arr
 
+
+def get_exclusion_mask_from_dataset_geom(dataset, exclude_regions):
+    geom_map = dataset.geoms['geom']
+    energy_axis_map = dataset.geoms['geom'].axes[0]
+    geom_image = geom_map.to_image().to_cube([energy_axis_map.squash()])
+    exclusion_mask = geom_image.region_mask(exclude_regions, inside=False)
+    return exclusion_mask
+
+def get_lima_maps(dataset, correlation_radius, correlate_off):
+    estimator = ExcessMapEstimator(correlation_radius*u.deg, correlate_off=correlate_off)
+    lima_maps = estimator.run(dataset)
+    return lima_maps
+
+def get_dataset_maps_dict(dataset, results=['counts','background']):
+    maps = {}
+    if 'counts' in results: maps['counts'] = dataset.counts.sum_over_axes()
+    if 'background' in results: maps['background'] = dataset.background.sum_over_axes()
+    return maps
+
+def get_high_level_maps_dict(lima_maps, exclusion_mask, results=['significance_all']):
+    '''results=['significance_all','significance_off','excess']'''
+    significance_map = lima_maps["sqrt_ts"]
+    excess_map = lima_maps["npred_excess"]
+    maps = {}
+    if 'significance_all' in results: maps['significance_all'] = significance_map
+    if 'significance_off' in results: maps['significance_off'] = significance_map * exclusion_mask
+    if 'excess' in results: maps['excess'] = excess_map
+    return maps
+
+def get_high_level_maps_from_dataset(dataset, exclude_regions, correlation_radius, correlate_off, results):
+    exclusion_mask = get_exclusion_mask_from_dataset_geom(dataset, exclude_regions)
+    lima_maps = get_lima_maps(dataset, correlation_radius, correlate_off)
+    maps = get_high_level_maps_dict(lima_maps, exclusion_mask, results)
+    return maps
+
+def get_skymaps_dict(dataset, exclude_regions, correlation_radius, correlate_off, results):
+    '''results='all', ['counts', 'background','significance_all','significance_off','excess']'''
+    
+    if results == 'all': results=['counts', 'background', 'significance_all', 'significance_off', 'excess']
+    
+    dataset_bool = 1*(('counts' in results) or ('background' in results))
+    estimator_bool = -1*(('significance_all' in results) or ('significance_off' in results) or ('excess' in results))
+    i_method = dataset_bool + estimator_bool # methods = {1: 'dataset_only', -1: 'estimator_only', 0: 'both'}
+    
+    if i_method >= 0: maps_dataset = get_dataset_maps_dict(dataset, results)
+    if i_method <= 0: maps_high_level = get_high_level_maps_from_dataset(dataset, exclude_regions, correlation_radius, correlate_off, results)
+
+    if i_method==0:  
+        maps_both = maps_dataset.copy()
+        maps_both.update(maps_high_level)
+        return maps_both
+    elif i_method==1: return maps_dataset
+    else: return maps_high_level
+
+def plot_skymap_from_dict(skymaps, key, crop_width=0 * u.deg, figsize=(5,5)):
+    skymaps_args = {
+        'counts': {
+            'cbar_label': 'events',
+            'title': 'counts'
+        },
+        'background': {
+            'cbar_label': 'events',
+            'title': 'background'
+        },
+        'significance': {
+            'cbar_label': '$\sigma$',
+            'title': 'significance'
+        },
+        'significance_off': {
+            'cbar_label': '$\sigma$',
+            'title': 'off significance'
+        },
+        'excess': {
+            'cbar_label': '',
+            'title': 'excess'
+        }
+    }
+
+    skymap = skymaps[key]
+    if crop_width != 0 * u.deg:
+        width = 0.5 * skymap.geom.width[0][0]
+        binsize = width / (0.5 * skymap.data.shape[-1])
+        n_crop_px = int(((width - crop_width)/binsize).value)
+        skymap = skymap.crop(n_crop_px)
+    
+    cbar_label, title = (skymaps_args[key]["cbar_label"], skymaps_args[key]["title"])
+    
+    fig,ax=plt.subplots(figsize=figsize,subplot_kw={"projection": skymap.geom.wcs})
+    if (key=='counts') or (key=='background'): skymap.plot(ax=ax, add_cbar=True, stretch="linear",kwargs_colorbar={'label': cbar_label})
+    elif key == 'excess': skymap.plot(ax=ax, add_cbar=True, stretch="linear", cmap='magma',kwargs_colorbar={'label': cbar_label})
+    else: skymap.plot(ax=ax, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma',kwargs_colorbar={'label': cbar_label})
+    ax.set(title=title)
+    plt.tight_layout()
+    plt.show()
+
 class BaseSimBMVCreator(ABC):
 
     def __init__(self) -> None:
@@ -1506,6 +1601,7 @@ class BaseSimBMVCreator(ABC):
         # Background
         self.lon_grad = self.cfg_background["spatial_model"]["lon_grad"]
         self.correlation_radius = self.cfg_background["maker"]["correlation_radius"]
+        self.correlate_off = self.cfg_background["maker"]["correlate_off"]
         self.ring_bkg_param = [self.cfg_background["maker"]["ring"]["internal_ring_radius"],self.cfg_background["maker"]["ring"]["width"]]
         self.fov_bkg_param = self.cfg_background["maker"]["fov"]["method"]
         
@@ -2434,9 +2530,124 @@ class BaseSimBMVCreator(ABC):
         exclusion_mask = geom_image.region_mask(self.exclude_regions, inside=False)
         exclusion_mask.cutout(self.source_pos, self.size_fov_acc).plot()
         plt.show()
+    
+    def plot_lima_maps(self, dataset, axis_info, cutout=True, method='FoV', fig_save_path=''):
+        emin_map,emax_map,offset_max = axis_info
+        internal_ring_radius,width_ring = self.ring_bkg_param
+        
+        geom_map = dataset.geoms['geom']
+        energy_axis_map = dataset.geoms['geom'].axes[0]
+        geom_image = geom_map.to_image().to_cube([energy_axis_map.squash()])
+        exclusion_mask = geom_image.region_mask(self.exclude_regions, inside=False)
+        exclusion = self.region_shape != 'noexclusion'
+        
+        # Get the maps
+        estimator = ExcessMapEstimator(self.correlation_radius*u.deg, correlate_off=True)
+        lima_maps = estimator.run(dataset)
+        significance_map = lima_maps["sqrt_ts"]
+        excess_map = lima_maps["npred_excess"]
+        
+        # Significance and excess
+        fig, ((ax1, ax2, ax3),(ax4, ax5, ax6)) = plt.subplots(
+            figsize=(18, 11),subplot_kw={"projection": lima_maps.geom.wcs}, ncols=3, nrows=2
+        )
+        # fig.delaxes(ax1)
+        plt.subplots_adjust(wspace=0.3, hspace=0.3)
+        
+        ax1.set_title("Spatial residuals map: diff/sqrt(model)")
+        g = dataset.plot_residuals_spatial(method='diff/sqrt(model)',ax=ax1, add_cbar=True, stretch="linear",norm=CenteredNorm())
+        # plt.colorbar(g,ax=ax1, shrink=1, label='diff/sqrt(model)')
+        
+        ax4.set_title("Significance map")
+        #significance_map.plot(ax=ax1, add_cbar=True, stretch="linear")
+        significance_map.plot(ax=ax4, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma')
 
-    def plot_skymaps(self, bkg_method='ring', axis_info_dataset=None, axis_info_map=None):
+        if exclusion: 
+            significance_map_off = significance_map * exclusion_mask
+            ax5.set_title("Off significance map")
+            #significance_map.plot(ax=ax1, add_cbar=True, stretch="linear")
+            significance_map_off.plot(ax=ax5, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma')
+
+        ax6.set_title("Excess map")
+        excess_map.plot(ax=ax6, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma')
+        
+        # Background and counts
+
+        ax2.set_title("Background map")
+        dataset.background.sum_over_axes().plot(ax=ax2, add_cbar=True, stretch="linear")
+
+        ax3.set_title("Counts map")
+        dataset.counts.sum_over_axes().plot(ax=ax3, add_cbar=True, stretch="linear")
+        
+        if method=='ring':
+            ring_center_pos = self.source_pos
+            r1 = SphericalCircle(ring_center_pos, self.exclusion_radius,
+                            edgecolor='yellow', facecolor='none',
+                            transform=ax6.get_transform('icrs'))
+            r2 = SphericalCircle(ring_center_pos, internal_ring_radius * u.deg,
+                                edgecolor='white', facecolor='none',
+                                transform=ax6.get_transform('icrs'))
+            r3 = SphericalCircle(ring_center_pos, internal_ring_radius * u.deg + width_ring * u.deg,
+                                edgecolor='white', facecolor='none',
+                                transform=ax6.get_transform('icrs'))
+            ax5.add_patch(r2)
+            ax5.add_patch(r1)
+            ax5.add_patch(r3)
+        plt.tight_layout()
+
+        if fig_save_path == '': fig_save_path=f"{self.plots_dir}/skymaps.png"
+        fig.savefig(f"{fig_save_path[:-4]}_data.png", dpi=300, transparent=False, bbox_inches='tight')
+        
+        # Residuals
+
+        significance_map_off = significance_map * exclusion_mask
+        significance_all = significance_map.data[np.isfinite(significance_map.data)]
+        significance_off = significance_map.data[np.logical_and(np.isfinite(significance_map.data), 
+                                                                exclusion_mask.data)]
+        fig, ax1 = plt.subplots(figsize=(4,4))
+        ax1.hist(
+            significance_all,
+            range=(-8,8),
+            density=True,
+            alpha=0.5,
+            color="red",
+            label="all bins",
+            bins=30,
+        )
+
+        ax1.hist(
+            significance_off,
+            range=(-8,8),
+            density=True,
+            alpha=0.5,
+            color="blue",
+            label="off bins",
+            bins=30,
+        )
+
+        # Now, fit the off distribution with a Gaussian
+        mu, std = norm_stats.fit(significance_off)
+        x = np.linspace(-8, 8, 30)
+        p = norm_stats.pdf(x, mu, std)
+        ax1.plot(x, p, lw=2, color="black")
+        p2 = norm_stats.pdf(x, 0, 1)
+        #ax.plot(x, p2, lw=2, color="green")
+        ax1.set_title(f"Background residuals map E= {emin_map:.1f} - {emax_map:.1f}")
+        ax1.text(-2.,0.001, f'mu = {mu:3.2f}\nstd={std:3.2f}',fontsize=14, fontweight='bold')
+        ax1.legend()
+        ax1.set_xlabel("Significance")
+        ax1.set_yscale("log")
+        ax1.set_ylim(1e-5, 1)
+        ax1.set_xlim(-5,6.)
+        #xmin, xmax = np.min(significance_off), np.max(significance_off)
+        #ax.set_xlim(xmin, xmax)
+        print("mu = ", mu," std= ",std )
+        plt.tight_layout()
+        fig.savefig(f"{fig_save_path[:-4]}_sigma_residuals.png", dpi=300, transparent=False, bbox_inches='tight')
+
+    def plot_skymaps(self, bkg_method='ring', stacked_dataset=None, axis_info_dataset=None, axis_info_map=None):
         if axis_info_dataset is None: axis_info_dataset = self.axis_info_dataset
         if axis_info_map is None: axis_info_map = self.axis_info_map
-        stacked_dataset = self.get_stacked_dataset(bkg_method=bkg_method, axis_info=axis_info_dataset)
-        plot_lima_maps(stacked_dataset, self.ring_bkg_param[0],self.source_pos,self.exclude_regions,self.exclu_rad,'',None,axis_info_map[:-1],cutout=True)
+        if stacked_dataset is None: self.stacked_dataset = self.get_stacked_dataset(bkg_method=bkg_method, axis_info=axis_info_dataset)
+        self.plot_lima_maps(self.stacked_dataset, axis_info_map[:-1],True,bkg_method)
+        
