@@ -1433,13 +1433,17 @@ def get_dataset_maps_dict(dataset, results=['counts','background']):
     return maps
 
 def get_high_level_maps_dict(lima_maps, exclusion_mask, results=['significance_all']):
-    '''results=['significance_all','significance_off','excess']'''
+    '''results='all', ['significance_all','significance_off','excess']'''
+    if results == 'all': results = ['significance_all','significance_off','excess']
+    
     significance_map = lima_maps["sqrt_ts"]
     excess_map = lima_maps["npred_excess"]
+    
     maps = {}
     if 'significance_all' in results: maps['significance_all'] = significance_map
     if 'significance_off' in results: maps['significance_off'] = significance_map * exclusion_mask
     if 'excess' in results: maps['excess'] = excess_map
+    
     return maps
 
 def get_high_level_maps_from_dataset(dataset, exclude_regions, correlation_radius, correlate_off, results):
@@ -1471,23 +1475,23 @@ def plot_skymap_from_dict(skymaps, key, crop_width=0 * u.deg, figsize=(5,5)):
     skymaps_args = {
         'counts': {
             'cbar_label': 'events',
-            'title': 'counts'
+            'title': 'Counts map'
         },
         'background': {
             'cbar_label': 'events',
-            'title': 'background'
+            'title': 'Background map'
         },
         'significance': {
-            'cbar_label': '$\sigma$',
-            'title': 'significance'
+            'cbar_label': 'significance [$\sigma$]',
+            'title': 'Significance map'
         },
         'significance_off': {
-            'cbar_label': '$\sigma$',
-            'title': 'off significance'
+            'cbar_label': 'significance [$\sigma$]',
+            'title': 'Off significance map'
         },
         'excess': {
-            'cbar_label': '',
-            'title': 'excess'
+            'cbar_label': 'events',
+            'title': 'Excess map'
         }
     }
 
@@ -2531,25 +2535,20 @@ class BaseSimBMVCreator(ABC):
         exclusion_mask.cutout(self.source_pos, self.size_fov_acc).plot()
         plt.show()
     
-    def plot_lima_maps(self, dataset, axis_info, cutout=True, method='FoV', fig_save_path=''):
-        emin_map,emax_map,offset_max = axis_info
+    def plot_lima_maps(self, dataset, axis_info, cutout=False, method='FoV', fig_save_path=''):
+        '''Compute and store skymaps'''
+        emin_map, emax_map, offset_max, nbin_offset = axis_info
         internal_ring_radius,width_ring = self.ring_bkg_param
+        if cutout: dataset = dataset.cutout(position = self.source_pos, width=offset_max)
+
+        self.exclusion_mask = get_exclusion_mask_from_dataset_geom(dataset, self.exclude_regions)
+        self.maps = get_skymaps_dict(dataset, self.exclude_regions, self.correlation_radius, self.correlate_off, 'all')
         
-        geom_map = dataset.geoms['geom']
-        energy_axis_map = dataset.geoms['geom'].axes[0]
-        geom_image = geom_map.to_image().to_cube([energy_axis_map.squash()])
-        exclusion_mask = geom_image.region_mask(self.exclude_regions, inside=False)
-        exclusion = self.region_shape != 'noexclusion'
-        
-        # Get the maps
-        estimator = ExcessMapEstimator(self.correlation_radius*u.deg, correlate_off=True)
-        lima_maps = estimator.run(dataset)
-        significance_map = lima_maps["sqrt_ts"]
-        excess_map = lima_maps["npred_excess"]
-        
+        significance_all = self.maps["significance_all"]
+
         # Significance and excess
         fig, ((ax1, ax2, ax3),(ax4, ax5, ax6)) = plt.subplots(
-            figsize=(18, 11),subplot_kw={"projection": lima_maps.geom.wcs}, ncols=3, nrows=2
+            figsize=(18, 11),subplot_kw={"projection": significance_all.geom.wcs}, ncols=3, nrows=2
         )
         # fig.delaxes(ax1)
         plt.subplots_adjust(wspace=0.3, hspace=0.3)
@@ -2560,36 +2559,34 @@ class BaseSimBMVCreator(ABC):
         
         ax4.set_title("Significance map")
         #significance_map.plot(ax=ax1, add_cbar=True, stretch="linear")
-        significance_map.plot(ax=ax4, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma')
+        self.maps["significance_all"].plot(ax=ax4, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma')
 
-        if exclusion: 
-            significance_map_off = significance_map * exclusion_mask
-            ax5.set_title("Off significance map")
-            #significance_map.plot(ax=ax1, add_cbar=True, stretch="linear")
-            significance_map_off.plot(ax=ax5, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma')
+        ax5.set_title("Off significance map")
+        #significance_map.plot(ax=ax1, add_cbar=True, stretch="linear")
+        self.maps["significance_off"].plot(ax=ax5, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma')
 
         ax6.set_title("Excess map")
-        excess_map.plot(ax=ax6, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma')
+        self.maps["excess"].plot(ax=ax6, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma')
         
         # Background and counts
 
         ax2.set_title("Background map")
-        dataset.background.sum_over_axes().plot(ax=ax2, add_cbar=True, stretch="linear")
+        self.maps["background"].plot(ax=ax2, add_cbar=True, stretch="linear")
 
         ax3.set_title("Counts map")
-        dataset.counts.sum_over_axes().plot(ax=ax3, add_cbar=True, stretch="linear")
+        self.maps["counts"].plot(ax=ax3, add_cbar=True, stretch="linear")
         
         if method=='ring':
             ring_center_pos = self.source_pos
             r1 = SphericalCircle(ring_center_pos, self.exclusion_radius,
                             edgecolor='yellow', facecolor='none',
-                            transform=ax6.get_transform('icrs'))
+                            transform=ax5.get_transform('icrs'))
             r2 = SphericalCircle(ring_center_pos, internal_ring_radius * u.deg,
                                 edgecolor='white', facecolor='none',
-                                transform=ax6.get_transform('icrs'))
+                                transform=ax5.get_transform('icrs'))
             r3 = SphericalCircle(ring_center_pos, internal_ring_radius * u.deg + width_ring * u.deg,
                                 edgecolor='white', facecolor='none',
-                                transform=ax6.get_transform('icrs'))
+                                transform=ax5.get_transform('icrs'))
             ax5.add_patch(r2)
             ax5.add_patch(r1)
             ax5.add_patch(r3)
@@ -2599,11 +2596,9 @@ class BaseSimBMVCreator(ABC):
         fig.savefig(f"{fig_save_path[:-4]}_data.png", dpi=300, transparent=False, bbox_inches='tight')
         
         # Residuals
-
-        significance_map_off = significance_map * exclusion_mask
-        significance_all = significance_map.data[np.isfinite(significance_map.data)]
-        significance_off = significance_map.data[np.logical_and(np.isfinite(significance_map.data), 
-                                                                exclusion_mask.data)]
+        significance_all = self.maps["significance_all"].data[np.isfinite(self.maps["significance_all"].data)]
+        significance_off = self.maps["significance_off"].data[np.logical_and(np.isfinite(self.maps["significance_all"].data), 
+                                                                self.exclusion_mask.data)]
         fig, ax1 = plt.subplots(figsize=(4,4))
         ax1.hist(
             significance_all,
@@ -2648,6 +2643,6 @@ class BaseSimBMVCreator(ABC):
     def plot_skymaps(self, bkg_method='ring', stacked_dataset=None, axis_info_dataset=None, axis_info_map=None):
         if axis_info_dataset is None: axis_info_dataset = self.axis_info_dataset
         if axis_info_map is None: axis_info_map = self.axis_info_map
+        cutout = (axis_info_dataset[2] != axis_info_map[2]) & (axis_info_dataset[2] > axis_info_map[2])
         if stacked_dataset is None: self.stacked_dataset = self.get_stacked_dataset(bkg_method=bkg_method, axis_info=axis_info_dataset)
-        self.plot_lima_maps(self.stacked_dataset, axis_info_map[:-1],True,bkg_method)
-        
+        self.plot_lima_maps(self.stacked_dataset, axis_info_map, cutout, bkg_method)
