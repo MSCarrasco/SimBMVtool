@@ -1,6 +1,6 @@
 # Installation steps
 
-`git clone https://github.com/gabemery/gammapy.git <path_to_gammapy_clone>`
+`git clone https://github.com/MSCarrasco/gammapy.git <path_to_gammapy_clone>`
 
 `cd <path_to_gammapy_clone>`
 
