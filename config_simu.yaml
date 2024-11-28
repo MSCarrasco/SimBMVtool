@@ -1,17 +1,20 @@
 ---
 paths:
-  irf: /fefs/aswg/workspace/marie-sophie.carrasco/projects/analysis/simulation/ressources/size_200_leakage_0.2_gammaness_eff60_ebins_5pdec_diffuse
-  gammapy_catalog: /fefs/aswg/workspace/marie-sophie.carrasco/projects/dev-github/gammapy-extra/datasets/catalogs/gammacat/gammacat.fits.gz
+  irf: /Users/carrasco/Prog/gammapy/data/size_200_leakage_0.2_gammaness_eff60_ebins_5pdec_diffuse
+  gammapy_catalog: /Users/carrasco/Prog/gammapy/gammapy-extra/datasets/catalogs/gammacat/gammacat.fits.gz
   output_dir: ../outputs_dev
   simulated_obs_dir: ../outputs_dev/datasets
   save_name_obs: gaussian_background
   save_name_suffix: 20_mn_consecutive_runs
 data:
   real: False
-  save_path_data: /fefs/aswg/workspace/marie-sophie.carrasco/projects/analysis/simulation/ressources/size_200_leakage_0.2_gammaness_eff60_ebins_5pdec_diffuse
+  save_path_data: /Users/carrasco/Prog/gammapy/data/size_200_leakage_0.2_gammaness_eff60_ebins_5pdec_diffuse
   run_list: [] # None, array of obs_ids
+  obs_pattern: dl3_LST-1.Run*.fits
+  cos_zenith_bin_edges: [-0.0, 0.25, 0.5, 0.75, 1.0] 
+  cos_zenith_bin_centers:  [0.125, 0.375, 0.625, 0.875]
 simulation:
-  n_run: 2                                    # per wobble
+  n_run: 1                                    # per wobble
   livetime: 1200                              # [s]
   single_pointing: False                      # If true, only W1 observations are simulated
   obs_collection_type: n_run_obs_per_wobble   # two_wobble_obs, n_run_obs_per_wobble
@@ -68,9 +71,10 @@ background:
     unit: "deg"
   maker:
     correlation_radius: 0.08    # [deg]
+    correlate_off: True
     ring:
-      internal_ring_radius: 0.3 # [deg]
-      width: 0.1                # [deg]
+      internal_ring_radius: 0.2 # [deg]
+      width: 0.3                # [deg]
     fov:
       method: scale # scale, fit
 irf:
