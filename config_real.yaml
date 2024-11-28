@@ -1,16 +1,15 @@
 ---
 paths:
-  irf: /fefs/aswg/workspace/marie-sophie.carrasco/projects/analysis/simulation/ressources/size_200_leakage_0.2_gammaness_eff60_ebins_5pdec_diffuse
-  gammapy_catalog: /fefs/aswg/workspace/marie-sophie.carrasco/projects/dev-github/gammapy-extra/datasets/catalogs/gammacat/gammacat.fits.gz
+  path_data: /fefs/aswg/workspace/marie-sophie.carrasco/projects/dev-github/gammapy-datasets/dev/joint-crab/dl3/magic
+  gammapy_catalog: /fefs/aswg/workspace/marie-sophie.carrasco/projects/dev-github/gammapy-datasets/dev/catalogs/gammacat/gammacat.fits.gz
   output_dir: ../outputs_dev
   simulated_obs_dir: ../outputs_dev/datasets
-  save_name_obs: crab_school
-  save_name_suffix: example
+  save_name_obs: gaussian_background
+  save_name_suffix: 20_mn_consecutive_runs
 data:
   real: True
-  save_path_data: ./example_dataset/Crab_Dec_2023
   run_list: [] # None, array of obs_ids
-  obs_pattern: dl3_LST-1.Run*.fits
+  obs_pattern: run*.fits
   cos_zenith_bin_edges: [-0.0, 0.25, 0.5, 0.75, 1.0] 
   cos_zenith_bin_centers:  [0.125, 0.375, 0.625, 0.875]
 simulation:

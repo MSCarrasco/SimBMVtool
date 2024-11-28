@@ -1,16 +1,15 @@
 ---
 paths:
-  irf: /Users/carrasco/Prog/gammapy/data/size_200_leakage_0.2_gammaness_eff60_ebins_5pdec_diffuse
-  gammapy_catalog: /Users/carrasco/Prog/gammapy/gammapy-extra/datasets/catalogs/gammacat/gammacat.fits.gz
+  path_data: /fefs/aswg/workspace/marie-sophie.carrasco/projects/dev-github/gammapy-datasets/dev/joint-crab/dl3/magic
+  gammapy_catalog: /fefs/aswg/workspace/marie-sophie.carrasco/projects/dev-github/gammapy-datasets/dev/catalogs/gammacat/gammacat.fits.gz
   output_dir: ../outputs_dev
   simulated_obs_dir: ../outputs_dev/datasets
   save_name_obs: gaussian_background
   save_name_suffix: 20_mn_consecutive_runs
 data:
   real: False
-  save_path_data: /Users/carrasco/Prog/gammapy/data/size_200_leakage_0.2_gammaness_eff60_ebins_5pdec_diffuse
   run_list: [] # None, array of obs_ids
-  obs_pattern: dl3_LST-1.Run*.fits
+  obs_pattern: run*.fits
   cos_zenith_bin_edges: [-0.0, 0.25, 0.5, 0.75, 1.0] 
   cos_zenith_bin_centers:  [0.125, 0.375, 0.625, 0.875]
 simulation:
@@ -25,11 +24,11 @@ simulation:
   e_min: 0.5      # [TeV]
   e_max: 10       # [TeV]
 wobble_1:
-  run: 11895
+  run: 5029748
   seed: 4
   obs_id: '1'
 wobble_2:
-  run: 11896
+  run: 5029748
   seed: 42
   obs_id: '2'
 source:
