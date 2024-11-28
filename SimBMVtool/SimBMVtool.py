@@ -228,28 +228,56 @@ class GaussianSpatialModel_LinearGradient_half(SpatialModel):
         exponent = -0.5 * ((1 - np.cos(sep)) / a)
         return u.Quantity(norm * np.exp(exponent).value, "sr-1", copy=COPY_IF_NEEDED)
 
-def get_run_info(path_data:str, obs_id:int):
-    """returns array with [livetime,pointing_radec,pointing_altaz]"""
+def get_data_store(dir_path, pattern, from_index=False):
+    if from_index:
+        data_store = DataStore.from_dir(f"{dir_path}",hdu_table_filename=f'hdu-index{pattern}.fits.gz',obs_table_filename=f'obs-index{pattern}.fits.gz')
+    else:
+        path = Path(dir_path)
+        paths = sorted(list(path.rglob(pattern)))
+        data_store = DataStore.from_events_files(paths)
+    
+    return data_store
+
+def get_obs_collection(dir_path, pattern, multiple_simulation_subdir=False,from_index=False,with_datastore=True):
+    if not multiple_simulation_subdir:
+        data_store = get_data_store(dir_path, pattern, from_index)
+        obs_collection = data_store.get_observations(required_irf='all-optional')
+    else:
+        path = Path(dir_path)
+        paths = sorted(list(path.rglob(pattern)))
+        obs_collection = Observations()
+        for path in paths:
+            obs_collection.append(Observation.read(path))
+        for iobs in range(len(obs_collection)):
+            obs_id=iobs+1
+            obs_collection[iobs].events.table.meta['OBS_ID'] = obs_id
+            obs_collection[iobs].obs_id = obs_id
+    
+    if with_datastore:
+        return data_store, obs_collection
+    else: 
+        return obs_collection
+    
+def get_run_info(path_data:str, pattern:str, obs_id:int):
+    """returns array with [livetime,pointing_radec,file_name]"""
     loc = EarthLocation.of_site('Roque de los Muchachos')
-    data_store = DataStore.from_dir(f"{path_data}",hdu_table_filename=f'hdu-index.fits.gz',obs_table_filename=f'obs-index.fits.gz')
+    data_store = get_data_store(path_data, pattern)
     obs_table = data_store.obs_table
     livetime = obs_table[obs_table["OBS_ID"] == obs_id]["LIVETIME"].data[0]
     ra = obs_table[obs_table["OBS_ID"] == obs_id]["RA_PNT"].data[0]
     dec = obs_table[obs_table["OBS_ID"] == obs_id]["DEC_PNT"].data[0]
-    alt = obs_table[obs_table["OBS_ID"] == obs_id]["ALT_PNT"].data[0]
-    az = obs_table[obs_table["OBS_ID"] == obs_id]["AZ_PNT"].data[0]
     pointing= SkyCoord(ra=ra*u.deg,dec=dec*u.deg)
-    pointing_altaz = AltAz(alt=alt * u.deg, az=az * u.deg,location=loc)
-    print(f"--Run {obs_id}--\nlivetime: {livetime}\npointing radec: {pointing}\npointing altaz: {pointing_altaz}")
-    return livetime, pointing, pointing_altaz
+    print(f"--Run {obs_id}--\nlivetime: {livetime}\npointing radec: {pointing}")
+    hdu_table = data_store.hdu_table
+    file_name = hdu_table[hdu_table["OBS_ID"]==obs_id]["FILE_NAME"][0]
+    return livetime, pointing, file_name
 
 # +
 # Les functions modifiées (pas proprement)
-
 def get_empty_obs_simu(Bkg_irf, axis_info, run_info, src_models, run_dir:str,flux_to_0=True, t_ref_str="2000-01-01 00:00:00", t_delay=0,verbose=False):
     '''Loads irf from file and return a simulated observation with its associated dataset'''
 
-    loc, source_pos, run, livetime, pointing, pointing_altaz = run_info
+    loc, source_pos, run, livetime, pointing, file_name = run_info
     # print(livetime)
     
     if axis_info is not None: 
@@ -268,7 +296,7 @@ def get_empty_obs_simu(Bkg_irf, axis_info, run_info, src_models, run_dir:str,flu
 
     # Loading IRFs
     irfs = load_irf_dict_from_file(
-        f"{run_dir}/dl3_LST-1.Run{'0'*(len(str(run))==4)}{run}.fits"
+        f"{run_dir}/{file_name}"
     )
     if Bkg_irf is not None: irfs['bkg'] = Bkg_irf
     if verbose: [print(irfs[irf]) for irf in irfs]
@@ -296,7 +324,7 @@ def get_empty_obs_simu(Bkg_irf, axis_info, run_info, src_models, run_dir:str,flu
 def get_empty_dataset_and_obs_simu(Bkg_irf, axis_info, run_info, src_models, run_dir:str,flux_to_0=True, t_ref_str="2000-01-01 00:00:00", t_delay=0,verbose=False):
     '''Loads irf from file and return a simulated observation with its associated dataset'''
 
-    loc, source_pos, run, livetime, pointing, pointing_altaz = run_info
+    loc, source_pos, run, livetime, pointing, file_name = run_info
     # print(livetime)
     
     if axis_info is not None: 
@@ -315,7 +343,7 @@ def get_empty_dataset_and_obs_simu(Bkg_irf, axis_info, run_info, src_models, run
 
     # Loading IRFs
     irfs = load_irf_dict_from_file(
-        f"{run_dir}/dl3_LST-1.Run{'0'*(len(str(run))==4)}{run}.fits"
+        f"{run_dir}/{file_name}"
     )
     if Bkg_irf is not None: irfs['bkg'] = Bkg_irf
     if verbose: [print(irfs[irf]) for irf in irfs]
@@ -367,7 +395,7 @@ def get_empty_dataset_and_obs_simu(Bkg_irf, axis_info, run_info, src_models, run
         name="my-dataset",
     )
 
-    maker = MapDatasetMaker(selection=["exposure", "background", "psf", "edisp"], fov_rotation_error_limit=1 * u.deg)
+    maker = MapDatasetMaker(selection=["exposure", "background", "edisp"], fov_rotation_error_limit=1 * u.deg)
     dataset = maker.run(empty, obs)
     if verbose: print(obs.obs_info)
     if verbose: print(dataset)
@@ -648,10 +676,10 @@ def scale_value(x,xlim,ylim):
     
     return y
 
-def get_geom(Bkg_irf, axis_info, run_info, frame='icrs'):
+def get_geom(Bkg_irf, axis_info, run_info):
     '''Return geom from bkg_irf axis or a set of given axis edges'''
 
-    loc, source_pos, run, livetime, pointing, pointing_altaz = run_info
+    loc, source_pos, run, livetime, pointing, file_name = run_info
     
     if axis_info is not None: 
         e_min, e_max, offset_max, nbin_offset= axis_info
@@ -666,14 +694,13 @@ def get_geom(Bkg_irf, axis_info, run_info, frame='icrs'):
         nbins_map = offset_axis.nbin
     
     binsize = offset_max / (nbins_map / 2)
-    if frame == 'icrs': skydir=(pointing.ra.degree,pointing.dec.degree)
-    if frame == 'altaz': skydir=(pointing_altaz.az.degree,pointing_altaz.alt.degree)
+    skydir=(pointing.ra.degree,pointing.dec.degree)
     
     geom = WcsGeom.create(
             skydir=skydir,
             binsz=binsize,
             npix=(nbins_map, nbins_map),
-            frame=frame,
+            frame='icrs',
             proj="CAR",
             axes=[energy_axis],
         )
@@ -861,9 +888,7 @@ class BaseSimBMVCreator(ABC):
         self.simulated_obs_dir = self.cfg_paths["simulated_obs_dir"]
         self.save_name_obs = self.cfg_paths["save_name_obs"]
         self.save_name_suffix = self.cfg_paths["save_name_suffix"]
-
-        self.run_dir=self.cfg_paths["irf"] # path to files to get the irfs used for simulation
-        self.path_data=self.cfg_paths["irf"] # path to files to get run information used for simulation
+        self.path_data=self.cfg_paths["path_data"] # path to files to get run information used for simulation
 
         # Data
         self.real_data = self.cfg_data["real"]
@@ -1000,17 +1025,17 @@ class BaseSimBMVCreator(ABC):
         #  Wobble 1
         self.seed_W1=self.cfg_wobble_1["seed"]
         run_W1=self.cfg_wobble_1["run"]
-        livetime_W1,self.pointing_W1,pointing_altaz_W1 = get_run_info(self.path_data,run_W1) 
+        livetime_W1,self.pointing_W1,file_name_W1 = get_run_info(self.path_data,self.obs_pattern,run_W1) 
         # The true livetime is retrieved by get_run_info in case you want to implement a very realistic simulation pipeline with a simulation for each true observation you have
         # Here we use the same info for every run, which is the simulation livetime
         # The get_run_info method is mostly use to have realistic pointings, but you can decide the values yourself by changing the next lines
-        self.run_info_W1=[self.loc,self.source_pos,run_W1,self.livetime_simu*(self.n_run if self.two_obs else 1),self.pointing_W1,pointing_altaz_W1]
+        self.run_info_W1=[self.loc,self.source_pos,run_W1,self.livetime_simu*(self.n_run if self.two_obs else 1),self.pointing_W1,file_name_W1]
         
         #  Wobble 2
         self.seed_W2=self.cfg_wobble_2["seed"]
         run_W2=self.cfg_wobble_2["run"]
-        livetime_W2,self.pointing_W2,pointing_altaz_W2 = get_run_info(self.path_data,run_W2)
-        self.run_info_W2=[self.loc,self.source_pos,run_W2,self.livetime_simu*(self.n_run if self.two_obs else 1),self.pointing_W2,pointing_altaz_W2]
+        livetime_W2,self.pointing_W2,file_name_W2 = get_run_info(self.path_data,self.obs_pattern,run_W2)
+        self.run_info_W2=[self.loc,self.source_pos,run_W2,self.livetime_simu*(self.n_run if self.two_obs else 1),self.pointing_W2,file_name_W2]
         
         print(f"Total simulated livetime: {self.tot_livetime_simu.to(u.h):.1f}")
 
@@ -1199,16 +1224,16 @@ class BaseSimBMVCreator(ABC):
                 obs_id = iobs + 1 + (1 if self.two_obs else self.n_run)*(wobble==2)
                 verbose = iobs == 0
                 sampler = MapDatasetEventSampler(random_state=random_state+iobs)
-                if self.true_collection: obs = get_empty_obs_simu(self.bkg_true_collection[iobs],None,run_info,self.source,self.run_dir,self.flux_to_0,self.t_ref,i*self.delay,verbose)
-                else: obs = get_empty_obs_simu(bkg_irf,None,run_info,self.source,self.run_dir,self.flux_to_0,self.t_ref,i*self.delay,verbose)
+                if self.true_collection: obs = get_empty_obs_simu(self.bkg_true_collection[iobs],None,run_info,self.source,self.path_data,self.flux_to_0,self.t_ref,i*self.delay,verbose)
+                else: obs = get_empty_obs_simu(bkg_irf,None,run_info,self.source,self.path_data,self.flux_to_0,self.t_ref,i*self.delay,verbose)
                 n = int(run_info[3]/oversampling.to_value("s")) + 1
                 oversampling = (run_info[3]/n) * u.s
                 run_info_over = deepcopy(run_info)
                 run_info_over[3] = oversampling.to_value("s")
                 for j in range(n):
                     print(j)
-                    if self.true_collection: tdataset, tobs = get_empty_dataset_and_obs_simu(self.bkg_true_collection[iobs],None,run_info_over,self.source,self.run_dir,self.flux_to_0,self.t_ref,i*self.delay+j*oversampling.to_value("s"),verbose=False)
-                    else: tdataset, tobs = get_empty_dataset_and_obs_simu(bkg_irf,None,run_info_over,self.source,self.run_dir,self.flux_to_0,self.t_ref,i*self.delay+j*oversampling.to_value("s"),verbose=False)
+                    if self.true_collection: tdataset, tobs = get_empty_dataset_and_obs_simu(self.bkg_true_collection[iobs],None,run_info_over,self.source,self.path_data,self.flux_to_0,self.t_ref,i*self.delay+j*oversampling.to_value("s"),verbose=False)
+                    else: tdataset, tobs = get_empty_dataset_and_obs_simu(bkg_irf,None,run_info_over,self.source,self.path_data,self.flux_to_0,self.t_ref,i*self.delay+j*oversampling.to_value("s"),verbose=False)
                     tdataset.fake(random_state=random_state+iobs)
 
                     events = sampler.run(tdataset, tobs)
