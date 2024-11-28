@@ -1,8 +1,10 @@
 # Installation steps
 
-`git clone https://github.com/gabemery/gammapy/tree/altaz_bkg_irf_rotation <path_to_gammapy_clone>`
+`git clone git@github.com:gabemery/gammapy.git <path_to_gammapy_clone>`
 
 `cd <path_to_gammapy_clone>`
+
+`git checkout altaz_bkg_irf_rotation`
 
 `conda env create -f environment-dev.yml -n <your_env_name>`
 
