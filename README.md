@@ -1,6 +1,6 @@
 # Installation steps
 
-`git clone git@github.com:gabemery/gammapy.git <path_to_gammapy_clone>`
+`git clone https://github.com/gabemery/gammapy.git <path_to_gammapy_clone>`
 
 `cd <path_to_gammapy_clone>`
 
@@ -12,9 +12,11 @@
 
 `python -m pip install .`
 
-`git clone https://github.com/MSCarrasco/acceptance_modelisation/tree/correct_alignment_transform_obs_to_camera_frame <path_to_accmodel_clone>`
+`git clone https://github.com/MSCarrasco/acceptance_modelisation.git <path_to_accmodel_clone>`
 
 `cd <path_to_accmodel_clone>`
+
+`git checkout SimBMVtool_compatible`
 
 `python setup.py install`
 
