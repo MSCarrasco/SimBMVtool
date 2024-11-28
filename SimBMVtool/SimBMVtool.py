@@ -816,7 +816,14 @@ def plot_skymap_from_dict(skymaps, key, crop_width=0 * u.deg, figsize=(5,5)):
     fig,ax=plt.subplots(figsize=figsize,subplot_kw={"projection": skymap.geom.wcs})
     if (key=='counts') or (key=='background'): skymap.plot(ax=ax, add_cbar=True, stretch="linear",kwargs_colorbar={'label': cbar_label})
     elif key == 'excess': skymap.plot(ax=ax, add_cbar=True, stretch="linear", cmap='magma',kwargs_colorbar={'label': cbar_label})
-    else: skymap.plot(ax=ax, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma',kwargs_colorbar={'label': cbar_label})
+    elif 'significance' in key: 
+        skymap.plot(ax=ax, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma',kwargs_colorbar={'label': cbar_label})
+        maxsig = np.nanmax(skymap.data)
+        im = ax.images        
+        cb = im[-1].colorbar 
+        maxsig = np.nanmax(skymap.data)
+        cb.ax.axhline(maxsig, c='g')
+        cb.ax.text(1.1,maxsig - 0.07,'max', color = 'g')
     ax.set(title=title)
     plt.tight_layout()
     plt.show()
@@ -863,8 +870,6 @@ class BaseSimBMVCreator(ABC):
         self.run_list = np.array(self.cfg_data["run_list"])
         self.all_obs_ids = np.array([])
         self.obs_pattern = self.cfg_data["obs_pattern"]
-        self.cos_zenith_bin_edges = np.flip(self.cfg_data["cos_zenith_bin_edges"])
-        self.cos_zenith_bin_centers = np.flip(self.cfg_data["cos_zenith_bin_centers"])
 
         # Source
         self.source_name=self.cfg_source["catalog_name"]
@@ -1648,6 +1653,9 @@ class BaseSimBMVCreator(ABC):
             cos_min, cos_max = self.cos_zenith_observations.min(), self.cos_zenith_observations.max()
             self.cos_zenith_bin_edges = np.flip(np.linspace(cos_min, cos_max, 5))
             self.cos_zenith_bin_centers = np.flip(self.cos_zenith_bin_edges[:-1] + 0.5*(self.cos_zenith_bin_edges[1:]-self.cos_zenith_bin_edges[:-1]))
+        elif zenith_bins=='config':
+            self.cos_zenith_bin_edges = np.flip(self.cfg_data["cos_zenith_bin_edges"])
+            self.cos_zenith_bin_centers = np.flip(self.cfg_data["cos_zenith_bin_centers"])
 
         i_collection_array = np.arange(0,len(self.obs_ids))
         
@@ -1863,13 +1871,13 @@ class BaseSimBMVCreator(ABC):
         plt.subplots_adjust(wspace=0.3, hspace=0.3)
         
         ax1.set_title("Spatial residuals map: diff/sqrt(model)")
-        g = dataset.plot_residuals_spatial(method='diff/sqrt(model)',ax=ax1, add_cbar=True, stretch="linear",norm=CenteredNorm())
+        dataset.plot_residuals_spatial(method='diff/sqrt(model)',ax=ax1, add_cbar=True, stretch="linear",norm=CenteredNorm())
         # plt.colorbar(g,ax=ax1, shrink=1, label='diff/sqrt(model)')
         
         ax4.set_title("Significance map")
         #significance_map.plot(ax=ax1, add_cbar=True, stretch="linear")
         self.maps["significance_all"].plot(ax=ax4, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma')
-
+        
         ax5.set_title("Off significance map")
         #significance_map.plot(ax=ax1, add_cbar=True, stretch="linear")
         self.maps["significance_off"].plot(ax=ax5, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma')
