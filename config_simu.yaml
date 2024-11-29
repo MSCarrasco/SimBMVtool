@@ -1,7 +1,7 @@
 ---
 paths:
-  path_data: /fefs/aswg/workspace/marie-sophie.carrasco/projects/dev-github/gammapy-datasets/dev/joint-crab/dl3/magic
-  gammapy_catalog: /fefs/aswg/workspace/marie-sophie.carrasco/projects/dev-github/gammapy-datasets/dev/catalogs/gammacat/gammacat.fits.gz
+  path_data: <path_to_local_gammapy_data_copy>/dev/hess-dl3-dr1/data
+  gammapy_catalog: <path_to_local_gammapy_data_copy>/dev/catalogs/gammacat/gammacat.fits.gz
   output_dir: ../outputs_dev
   simulated_obs_dir: ../outputs_dev/datasets
   save_name_obs: gaussian_background
@@ -9,7 +9,7 @@ paths:
 data:
   real: False
   run_list: [] # None, array of obs_ids
-  obs_pattern: run*.fits
+  obs_pattern: '*_dl3_*.fits.gz'
   cos_zenith_bin_edges: [-0.0, 0.25, 0.5, 0.75, 1.0] 
   cos_zenith_bin_centers:  [0.125, 0.375, 0.625, 0.875]
 simulation:
@@ -21,14 +21,12 @@ simulation:
   delay: 1200                                 # [s]
   time_oversampling: 100                      # [s] time step between subdatasets, i.e. maximum time step for background IRF evaluation
   fov_rotation_error_limit: 1                 # [deg] maximum estimated FoV rotation error before re-evaluation of the background IRF evaluation by gammapy
-  e_min: 0.5      # [TeV]
-  e_max: 10       # [TeV]
 wobble_1:
-  run: 5029748
+  run: 23523
   seed: 4
   obs_id: '1'
 wobble_2:
-  run: 5029748
+  run: 23559
   seed: 42
   obs_id: '2'
 source:
@@ -36,12 +34,12 @@ source:
   coordinates:
     ra: 83.63308
     dec: 22.0145
-  flux_to_0: False # Set to True for background only simulated data
+  flux_to_0: True # Set to True for background only simulated data
   exclusion_region:
     shape: n_circles # n_circles, ellipse, noexclusion
     n_circles:
       circle_1:       
-        radius: 0.3
+        radius: 0.35
         ra: 83.63308
         dec: 22.0145
     ellipse:
@@ -64,7 +62,7 @@ background:
     lat_grad: 0
     lon_grad_variation: False
     lat_grad_variation: False
-    sigma: 0.6
+    sigma: 1
     phi: 0
     e: 0
     unit: "deg"
@@ -91,7 +89,7 @@ acceptance:
   single_file_path: /fefs/aswg/workspace/ali.baktash/simulation_data/centered_full_gaussian/no_exlcusion/teststacked_exclusion_map.fits
   energy:
     e_min: 0.5
-    e_max: 50
+    e_max: 10
     unit: TeV
     nbin: 3
   offset:

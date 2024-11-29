@@ -22,6 +22,6 @@
 
 `pip install seaborn`
 
-You will need to download gammapy datasets containing source catalogs and example files used in the demonstration notebooks with `gammapy download datasets --out <path_to_local_copy>`
+`gammapy download datasets --out <path_to_local_gammapy_data_copy>`
 
-Change the path to catalog and data accordingly in the config files
+Change the path to gammapy catalog and data accordingly in the config files
