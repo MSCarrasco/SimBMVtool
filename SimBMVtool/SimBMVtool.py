@@ -274,7 +274,7 @@ def get_run_info(path_data:str, pattern:str, obs_id:int):
 
 # +
 # Les functions modifiées (pas proprement)
-def get_empty_obs_simu(Bkg_irf, axis_info, run_info, src_models, run_dir:str,flux_to_0=True, t_ref_str="2000-01-01 00:00:00", t_delay=0,verbose=False):
+def get_empty_obs_simu(Bkg_irf, axis_info, run_info, src_models, path_data:str,flux_to_0=True, t_ref_str="2000-01-01 00:00:00", t_delay=0,verbose=False):
     '''Loads irf from file and return a simulated observation with its associated dataset'''
 
     loc, source_pos, run, livetime, pointing, file_name = run_info
@@ -296,7 +296,7 @@ def get_empty_obs_simu(Bkg_irf, axis_info, run_info, src_models, run_dir:str,flu
 
     # Loading IRFs
     irfs = load_irf_dict_from_file(
-        f"{run_dir}/{file_name}"
+        f"{path_data}/{file_name}"
     )
     if Bkg_irf is not None: irfs['bkg'] = Bkg_irf
     if verbose: [print(irfs[irf]) for irf in irfs]
@@ -321,7 +321,7 @@ def get_empty_obs_simu(Bkg_irf, axis_info, run_info, src_models, run_dir:str,flu
 
     return obs
 
-def get_empty_dataset_and_obs_simu(Bkg_irf, axis_info, run_info, src_models, run_dir:str,flux_to_0=True, t_ref_str="2000-01-01 00:00:00", t_delay=0,verbose=False):
+def get_empty_dataset_and_obs_simu(Bkg_irf, axis_info, run_info, src_models, path_data:str,flux_to_0=True, t_ref_str="2000-01-01 00:00:00", t_delay=0,verbose=False):
     '''Loads irf from file and return a simulated observation with its associated dataset'''
 
     loc, source_pos, run, livetime, pointing, file_name = run_info
@@ -343,8 +343,9 @@ def get_empty_dataset_and_obs_simu(Bkg_irf, axis_info, run_info, src_models, run
 
     # Loading IRFs
     irfs = load_irf_dict_from_file(
-        f"{run_dir}/{file_name}"
+        f"{path_data}/{file_name}"
     )
+
     if Bkg_irf is not None: irfs['bkg'] = Bkg_irf
     if verbose: [print(irfs[irf]) for irf in irfs]
 
@@ -355,7 +356,7 @@ def get_empty_dataset_and_obs_simu(Bkg_irf, axis_info, run_info, src_models, run
     delay=t_delay*u.s
     # print(delay)
     obs = Observation.create(
-        pointing=pointing_info, livetime=livetime,irfs=irfs, location=loc, obs_id='0',reference_time=t_ref,
+        pointing=pointing_info, livetime=livetime, irfs=irfs, location=loc, obs_id='0',reference_time=t_ref,
 		tstart=delay,
 		tstop=delay + livetime,
     )
