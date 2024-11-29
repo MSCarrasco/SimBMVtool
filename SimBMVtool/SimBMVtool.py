@@ -876,8 +876,7 @@ class BaseSimBMVCreator(ABC):
         self.cfg_paths = config["paths"]
         self.cfg_data = self.config["data"]
         self.cfg_simulation = config["simulation"]
-        self.cfg_wobble_1 = config["wobble_1"]
-        self.cfg_wobble_2 = config["wobble_2"]
+        self.cfg_wobbles = config["wobbles"]
         self.cfg_source = config["source"]
         self.cfg_background = config["background"]
         self.cfg_irf = config["irf"]
@@ -1015,40 +1014,45 @@ class BaseSimBMVCreator(ABC):
         self.time_oversampling = self.cfg_simulation["time_oversampling"] * u.s
         self.fov_rotation_error_limit = self.cfg_simulation["fov_rotation_error_limit"] * u.deg
         
-        self.single_pointing = self.cfg_simulation["single_pointing"]
+        self.single_pointing = self.cfg_simulation["single_pointing"] # Code will just use wobble_1 informations
         self.obs_collection_type = self.cfg_simulation["obs_collection_type"]
-        self.two_obs = self.obs_collection_type == 'two_wobble_obs'
+        self.one_obs_per_wobble = self.obs_collection_type == 'one_obs_per_wobble'
         self.n_run = self.cfg_simulation["n_run"]
         self.livetime_simu = self.cfg_simulation["livetime"]
-        self.tot_livetime_simu = self.n_run*self.livetime_simu*u.s
-        if not self.single_pointing: self.tot_livetime_simu *= 2
+
+        #  Wobbles
+        self.n_wobbles = len(self.cfg_wobbles)
+        self.wobble_seeds = []
+        self.wobble_runs = []
+        self.wobble_pointings = []
+        self.wobble_run_info = []
         
-        #  Wobble 1
-        self.seed_W1=self.cfg_wobble_1["seed"]
-        run_W1=self.cfg_wobble_1["run"]
-        livetime_W1,self.pointing_W1,file_name_W1 = get_run_info(self.path_data,self.obs_pattern,run_W1) 
-        # The true livetime is retrieved by get_run_info in case you want to implement a very realistic simulation pipeline with a simulation for each true observation you have
-        # Here we use the same info for every run, which is the simulation livetime
-        # The get_run_info method is mostly use to have realistic pointings, but you can decide the values yourself by changing the next lines
-        self.run_info_W1=[self.loc,self.source_pos,run_W1,self.livetime_simu*(self.n_run if self.two_obs else 1),self.pointing_W1,file_name_W1]
+        for i in range(self.n_wobbles):
+            cfg_wobble = self.cfg_wobbles[f"wobble_{i+1}"]
+            self.wobble_runs.append(cfg_wobble["run"])
+            self.wobble_seeds.append(cfg_wobble["seed"])
+            wobble_livetime,wobble_pointing,wobble_file_name = get_run_info(self.path_data,self.obs_pattern,self.wobble_runs[-1]) 
+            self.wobble_pointings.append(wobble_pointing)
+            # The true livetime is retrieved by get_run_info in case you want to implement a very realistic simulation pipeline with a simulation for each true observation you have
+            # Here we use the same info for every run, which is the simulation livetime
+            # The get_run_info method is mostly use to have realistic pointings, but you can decide the values yourself by changing the next lines
+            self.wobble_run_info.append([self.loc, self.source_pos, self.wobble_runs[-1], self.livetime_simu*(self.n_run if self.one_obs_per_wobble else 1), wobble_pointing, wobble_file_name])
         
-        #  Wobble 2
-        self.seed_W2=self.cfg_wobble_2["seed"]
-        run_W2=self.cfg_wobble_2["run"]
-        livetime_W2,self.pointing_W2,file_name_W2 = get_run_info(self.path_data,self.obs_pattern,run_W2)
-        self.run_info_W2=[self.loc,self.source_pos,run_W2,self.livetime_simu*(self.n_run if self.two_obs else 1),self.pointing_W2,file_name_W2]
-        
+        self.livetime_per_wobble = self.n_run * self.livetime_simu*u.s
+        self.tot_livetime_simu = self.n_wobbles * self.livetime_per_wobble
+
         print(f"Total simulated livetime: {self.tot_livetime_simu.to(u.h):.1f}")
 
         # Naming scheme
         self.save_name_obs = f"{self.cfg_paths['save_name_obs']}"
-        if self.two_obs: self.save_name_obs += f"_{0.5*self.tot_livetime_simu.to(u.h).value:.0f}h"
+        if self.one_obs_per_wobble: self.save_name_obs += f"_{self.livetime_per_wobble.to(u.h).value:.0f}h_per_wobble"
 
         self.multiple_simulation_subdir = False # TO-DO adapt for multiple subdirectories
         self.save_path_simu_joined = ''
         if self.multiple_simulation_subdir: self.save_path_simu = self.save_path_simu_joined
         elif not self.real_data: self.save_path_simu = f"{self.simulated_obs_dir}/{self.save_name_obs}/{self.obs_collection_type}"+f"_{self.save_name_suffix}"*(self.save_name_suffix is not None)
         else: self.save_path_simu = self.cfg_data['save_path_data']
+        
         # Acceptance parameters
         self.method = self.cfg_acceptance["method"]
 
@@ -1210,19 +1214,19 @@ class BaseSimBMVCreator(ABC):
         for f in files:
             Path(f).unlink()
         
-        bkg_irf_W1=self.bkg_true_irf
-        bkg_irf_W2=self.bkg_true_irf # In case you want different IRFs you can change it here
+        bkg_irf_arr =[]
+        for i in np.arange(self.n_wobbles): bkg_irf_arr.append(self.bkg_true_irf) # In case you want different IRFs you can change it here
 
-        for wobble,bkg_irf,run_info,random_state in zip([1,2],[bkg_irf_W1,bkg_irf_W2],[self.run_info_W1,self.run_info_W2],[self.seed_W1,self.seed_W2]):
+        for wobble,bkg_irf,run_info,random_state in zip(np.arange(self.n_wobbles)+1,bkg_irf_arr,self.wobble_run_info,self.wobble_seeds):
             i = 0
             if self.single_pointing and (wobble ==  2): break
 
             # Loop pour résolution temporelle. Paramètre "oversampling"
-            for iobs in range(1 if self.two_obs else self.n_run):
+            for iobs in range(1 if self.one_obs_per_wobble else self.n_run):
                 print(iobs)
                 events_all = None
                 oversampling = self.time_oversampling
-                obs_id = iobs + 1 + (1 if self.two_obs else self.n_run)*(wobble==2)
+                obs_id = iobs + 1 + (1 if self.one_obs_per_wobble else self.n_run*(wobble-1))*(wobble > 1)
                 verbose = iobs == 0
                 sampler = MapDatasetEventSampler(random_state=random_state+iobs)
                 if self.true_collection: obs = get_empty_obs_simu(self.bkg_true_collection[iobs],None,run_info,self.source,self.path_data,self.flux_to_0,self.t_ref,i*self.delay,verbose)
@@ -1751,7 +1755,7 @@ class BaseSimBMVCreator(ABC):
         if radec_map:            
             # By default the map is for W1 pointing
             # TO-DO: option to chose the pointing
-            pointing, run_info = self.pointing_W1, self.run_info_W1
+            pointing, run_info = self.wobble_pointings[0], self.wobble_run_info[0]
             pointing_info = FixedPointingInfo(mode=PointingMode.POINTING, fixed_icrs=pointing, location=self.loc)
             obstime=Time(self.t_ref)
             ontime= self.livetime_simu * u.s
@@ -1870,7 +1874,7 @@ class BaseSimBMVCreator(ABC):
                 self.plot_model(data=data, irf=irf, residuals=residuals, profile=profile, downsampled=True, i_irf=cos_center, zenith_binned=True, title=title, fig_save_path=fig_save_path, plot_hist=False)
 
     def plot_exclusion_mask(self):
-        geom=get_geom(None,self.axis_info_dataset,self.run_info_W1)
+        geom=get_geom(None,self.axis_info_dataset,self.wobble_run_info[0])
         geom_image = geom.to_image().to_cube([self.energy_axis_irf.squash()])
 
         # Make the exclusion mask

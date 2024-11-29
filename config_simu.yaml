@@ -1,11 +1,11 @@
 ---
 paths:
-  path_data: <path_to_local_gammapy_data_copy>/dev/hess-dl3-dr1/data
-  gammapy_catalog: <path_to_local_gammapy_data_copy>/dev/catalogs/gammacat/gammacat.fits.gz
+  path_data: ./gammapy-datasets/hess-dl3-dr1/data
+  gammapy_catalog: ./gammapy-datasets/catalogs/gammacat/gammacat.fits.gz
   output_dir: ../outputs_dev
   simulated_obs_dir: ../outputs_dev/datasets
   save_name_obs: gaussian_background
-  save_name_suffix: 20_mn_consecutive_runs
+  save_name_suffix: 10_mn_consecutive_runs_4_wobbles
 data:
   real: False
   run_list: [] # None, array of obs_ids
@@ -14,23 +14,28 @@ data:
   cos_zenith_bin_centers:  [0.125, 0.375, 0.625, 0.875]
 simulation:
   n_run: 1                                    # per wobble
-  livetime: 1200                              # [s]
+  livetime: 600                              # [s]
   single_pointing: False                      # If true, only W1 observations are simulated
-  obs_collection_type: n_run_obs_per_wobble   # two_wobble_obs, n_run_obs_per_wobble
+  obs_collection_type: n_run_obs_per_wobble   # one_obs_per_wobble, n_run_obs_per_wobble
   t_ref: '2024-10-05 23:00:00'
-  delay: 1200                                 # [s]
+  delay: 600                                 # [s]
   time_oversampling: 100                      # [s] time step between subdatasets, i.e. maximum time step for background IRF evaluation
   fov_rotation_error_limit: 1                 # [deg] maximum estimated FoV rotation error before re-evaluation of the background IRF evaluation by gammapy
-wobble_1:
-  run: 23523
-  seed: 4
-  obs_id: '1'
-wobble_2:
-  run: 23559
-  seed: 42
-  obs_id: '2'
+wobbles:
+  wobble_1:
+    run: 23523
+    seed: 4
+  wobble_2:
+    run: 23526
+    seed: 42
+  wobble_3:
+    run: 23559
+    seed: 404
+  wobble_4:
+    run: 23592
+    seed: 666
 source:
-  catalog_name: Crab nebula # Gammacat name. If not found, will use coordinates given in config
+  catalog_name: Crab nebula # Catalog name. If not found, will use coordinates given in config
   coordinates:
     ra: 83.63308
     dec: 22.0145
@@ -42,7 +47,7 @@ source:
         radius: 0.35
         ra: 83.63308
         dec: 22.0145
-    ellipse:
+    ellipse: # Centered on source by default
       width: 0.2                              # [°]
       height: 0.6                             # [°]
       angle: 45                               # [°]
@@ -62,7 +67,7 @@ background:
     lat_grad: 0
     lon_grad_variation: False
     lat_grad_variation: False
-    sigma: 1
+    sigma: 2
     phi: 0
     e: 0
     unit: "deg"
@@ -93,7 +98,7 @@ acceptance:
     unit: TeV
     nbin: 3
   offset:
-    offset_max: 1.5           # [deg]
+    offset_max: 3           # [deg]
     nbin: 11
   cos_zenith_binning:
     zenith_binning: False
