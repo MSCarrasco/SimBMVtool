@@ -5,7 +5,7 @@ paths:
   output_dir: ../outputs_dev
   simulated_obs_dir: ../outputs_dev/datasets
   save_name_obs: gaussian_background
-  save_name_suffix: 10_mn_consecutive_runs_4_wobbles
+  save_name_suffix: 4_wobbles_10_mn_consecutive_runs_norm_1
 data:
   real: False
   run_list: [] # None, array of obs_ids
@@ -13,7 +13,7 @@ data:
   cos_zenith_bin_edges: [-0.0, 0.25, 0.5, 0.75, 1.0] 
   cos_zenith_bin_centers:  [0.125, 0.375, 0.625, 0.875]
 simulation:
-  n_run: 1                                    # per wobble
+  n_run: 2                                    # per wobble
   livetime: 600                              # [s]
   single_pointing: False                      # If true, only W1 observations are simulated
   obs_collection_type: n_run_obs_per_wobble   # one_obs_per_wobble, n_run_obs_per_wobble
@@ -44,7 +44,7 @@ source:
     shape: n_circles # n_circles, ellipse, noexclusion
     n_circles:
       circle_1:       
-        radius: 0.35
+        radius: 0.3
         ra: 83.63308
         dec: 22.0145
     ellipse: # Centered on source by default
@@ -56,7 +56,7 @@ background:
     model: PowerLawNormSpectralModel
     factor: 2.4
     scale: 1
-    norm: 10
+    norm: 1
     reference: 1 TeV
     unit: sr-1 s-1 TeV-1
   spatial_model:
@@ -99,7 +99,7 @@ acceptance:
     nbin: 3
   offset:
     offset_max: 3           # [deg]
-    nbin: 11
+    nbin: 7
   cos_zenith_binning:
     zenith_binning: False
     initial_cos_zenith_binning: 0.01
