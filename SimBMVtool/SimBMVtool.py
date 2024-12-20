@@ -52,7 +52,7 @@ from gammapy.modeling import Parameter, Parameters
 from gammapy.utils.compat import COPY_IF_NEEDED
 
 from itertools import product
-from acceptance_modelisation import RadialAcceptanceMapCreator, Grid3DAcceptanceMapCreator, BackgroundCollectionZenith
+from baccmod import RadialAcceptanceMapCreator, Grid3DAcceptanceMapCreator, BackgroundCollectionZenith
 from abc import ABC, abstractmethod
 from typing import Tuple, List, Optional, Union
 from gammapy.datasets import MapDatasetEventSampler
@@ -780,7 +780,54 @@ def get_high_level_maps_dict(lima_maps, exclusion_mask, results=['significance_a
     if 'significance_all' in results: maps['significance_all'] = significance_map
     if 'significance_off' in results: maps['significance_off'] = significance_map * exclusion_mask
     if 'excess' in results: maps['excess'] = excess_map
-    
+    # Residuals
+    if results == 'all':
+        significance_all = maps["significance_all"].data[np.isfinite(maps["significance_all"].data)]
+        significance_off = maps["significance_off"].data[np.logical_and(np.isfinite(maps["significance_all"].data), 
+                                                                exclusion_mask.data)]
+        emin_map, emax_map = significance_all.geom.axes['energy'].bounds
+        
+        fig, ax1 = plt.subplots(figsize=(4,4))
+        ax1.hist(
+            significance_all,
+            range=(-8,8),
+            density=True,
+            alpha=0.5,
+            color="red",
+            label="all bins",
+            bins=30,
+        )
+
+        ax1.hist(
+            significance_off,
+            range=(-8,8),
+            density=True,
+            alpha=0.5,
+            color="blue",
+            label="off bins",
+            bins=30,
+        )
+
+        # Now, fit the off distribution with a Gaussian
+        mu, std = norm_stats.fit(significance_off)
+        x = np.linspace(-8, 8, 30)
+        p = norm_stats.pdf(x, mu, std)
+        ax1.plot(x, p, lw=2, color="black")
+        p2 = norm_stats.pdf(x, 0, 1)
+        #ax.plot(x, p2, lw=2, color="green")
+        ax1.set_title(f"Background residuals map E= {emin_map:.1f} - {emax_map:.1f}")
+        ax1.text(-2.,0.001, f'mu = {mu:3.2f}\nstd={std:3.2f}',fontsize=14, fontweight='bold')
+        ax1.legend()
+        ax1.set_xlabel("Significance")
+        ax1.set_yscale("log")
+        ax1.set_ylim(1e-5, 1)
+        ax1.set_xlim(-5,6.)
+        #xmin, xmax = np.min(significance_off), np.max(significance_off)
+        #ax.set_xlim(xmin, xmax)
+        print("mu = ", mu," std= ",std )
+        plt.tight_layout()
+        maps["residuals_histogram"] = fig
+
     return maps
 
 def get_high_level_maps_from_dataset(dataset, exclude_regions, correlation_radius, correlate_off, results):
@@ -818,7 +865,7 @@ def plot_skymap_from_dict(skymaps, key, crop_width=0 * u.deg, figsize=(5,5)):
             'cbar_label': 'events',
             'title': 'Background map'
         },
-        'significance': {
+        'significance_all': {
             'cbar_label': 'significance [$\sigma$]',
             'title': 'Significance map'
         },
@@ -847,11 +894,13 @@ def plot_skymap_from_dict(skymaps, key, crop_width=0 * u.deg, figsize=(5,5)):
     elif 'significance' in key: 
         skymap.plot(ax=ax, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma',kwargs_colorbar={'label': cbar_label})
         maxsig = np.nanmax(skymap.data)
+        minsig = np.nanmin(skymap.data)
         im = ax.images        
         cb = im[-1].colorbar 
-        maxsig = np.nanmax(skymap.data)
         cb.ax.axhline(maxsig, c='g')
-        cb.ax.text(1.1,maxsig - 0.07,'max', color = 'g')
+        cb.ax.text(1.1,maxsig - 0.07,' max', color = 'g')
+        cb.ax.axhline(minsig, c='g')
+        cb.ax.text(1.1,minsig - 0.07,' min', color = 'g')
     ax.set(title=title)
     plt.tight_layout()
     plt.show()
@@ -1319,7 +1368,7 @@ class BaseSimBMVCreator(ABC):
                 hdu_acceptance.writeto(f'{self.acceptance_files_dir}/acceptance_obs-{obs_id}.fits', overwrite=True)
         self.load_output_background_irfs()
     
-    def get_stacked_dataset(self, bkg_method=None, axis_info='irf'):
+    def get_unstacked_dataset(self, axis_info='irf'):
         source,source_pos,source_region = self.source_info
         if axis_info=='irf': emin,emax,offset_max,nbin_offset = self.axis_info_irf
         elif axis_info=='map': emin,emax,offset_max,nbin_offset = self.axis_info_map
@@ -1371,6 +1420,60 @@ class BaseSimBMVCreator(ABC):
             dataset_map = maker.run(base_map_dataset.copy(), obs)
             dataset_map = maker_safe_mask.run(dataset_map, obs)
             unstacked_datasets.append(dataset_map)
+        return unstacked_datasets
+    
+    def get_stacked_dataset(self, bkg_method=None, axis_info='irf'):
+        source,source_pos,source_region = self.source_info
+        if axis_info=='irf': emin,emax,offset_max,nbin_offset = self.axis_info_irf
+        elif axis_info=='map': emin,emax,offset_max,nbin_offset = self.axis_info_map
+        else: emin,emax,offset_max,nbin_offset = axis_info
+
+        exclusion = self.region_shape != 'noexclusion'
+
+        # Declare the non-spatial axes 
+        unit="TeV"
+        nbin_energy = 10
+
+        energy_axis = MapAxis.from_energy_bounds(
+            emin, emax, nbin=nbin_energy, per_decade=True, unit=unit, name="energy"
+        )
+
+        # Reduced IRFs are defined in true energy (i.e. not measured energy). 
+        # The bounds need to take into account the energy dispersion. 
+        edisp_frac = 0.3
+        emin_true,emax_true = ((1-edisp_frac)*emin , (1+edisp_frac)*emax)
+        nbin_energy_true = 20
+
+        energy_axis_true = MapAxis.from_energy_bounds(
+            emin_true, emax_true, nbin=nbin_energy_true, per_decade=True, unit=unit, name="energy_true"
+        )
+        
+        nbins_map = 2*nbin_offset
+        binsize = offset_max / (nbins_map / 2)
+
+        # Create the geometry with the additional axes
+        geom = WcsGeom.create(
+            skydir=(source_pos.ra.degree,source_pos.dec.degree),
+            binsz=binsize, 
+            npix=(nbins_map, nbins_map),
+            frame="icrs",
+            proj="CAR",
+            axes=[energy_axis],
+        )
+
+        # Get the energy-integrated image
+        geom_image = geom.to_image().to_cube([energy_axis])
+
+        base_map_dataset = MapDataset.create(geom=geom_image)
+        unstacked_datasets = Datasets()
+
+        maker = MapDatasetMaker(selection=["counts", "background"])
+        maker_safe_mask = SafeMaskMaker(methods=["offset-max"], offset_max=offset_max)
+        
+        for obs in self.obs_collection:
+            dataset_map = maker.run(base_map_dataset.copy(), obs)
+            dataset_map = maker_safe_mask.run(dataset_map, obs)
+            unstacked_datasets.append(dataset_map)
 
         # Stack the datasets
         unstacked_datasets_local = unstacked_datasets.copy()
@@ -1400,7 +1503,7 @@ class BaseSimBMVCreator(ABC):
         for dataset_loc in unstacked_datasets_local:
             # Ring extracting makes sense only for 2D analysis
             if bkg_method == 'ring': 
-                dataset_on_off = ring_bkg_maker.run(dataset_loc.to_image())
+                dataset_on_off = ring_bkg_maker.run(dataset_loc)
                 stacked_on_off.stack(dataset_on_off)
             else:
                 if bkg_method == 'FoV':  
