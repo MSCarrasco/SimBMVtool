@@ -4,8 +4,6 @@
 
 `cd <path_to_gammapy_clone>`
 
-`git checkout altaz_bkg_irf_rotation`
-
 `conda env create -f environment-dev.yml -n <your_env_name>`
 
 `conda activate <your_env_name>`
