@@ -23,8 +23,10 @@ We are using a custom gammapy branch for reasons related to the simulation
 
 `git clone https://github.com/MSCarrasco/SimBMVtool.git <path_to_SimBMVtool_clone>`
 
-`git cd <path_to_SimBMVtool_clone>`
+`cd <path_to_SimBMVtool_clone>`
 
 `gammapy download datasets --out <path_to_local_gammapy_data_copy>`
 
 Change the path to gammapy catalog and data accordingly in the config files
+
+Now you can use the notebooks and follow the tutorials
