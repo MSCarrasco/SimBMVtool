@@ -24,8 +24,8 @@
 
 `cd <path_to_SimBMVtool_clone>`
 
-`git checkout SimBMVtool_baccmod`
-
 `gammapy download datasets --out <path_to_local_gammapy_data_copy>`
 
 Change the path to gammapy catalog and data accordingly in the config files
+
+Now you can use the notebooks and follow the tutorials
