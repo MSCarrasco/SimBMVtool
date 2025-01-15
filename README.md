@@ -1,6 +1,7 @@
 # Installation steps
 
 ## Working environment with gammapy and BAccMod
+We are using a custom gammapy branch for reasons related to the simulation
 
 `git clone https://github.com/MSCarrasco/gammapy.git <path_to_gammapy_clone>`
 
@@ -23,8 +24,6 @@
 `git clone https://github.com/MSCarrasco/SimBMVtool.git <path_to_SimBMVtool_clone>`
 
 `git cd <path_to_SimBMVtool_clone>`
-
-`git checkout SimBMVtool_baccmod`
 
 `gammapy download datasets --out <path_to_local_gammapy_data_copy>`
 
