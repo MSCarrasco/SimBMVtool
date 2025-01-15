@@ -1,19 +1,16 @@
 ---
 paths:
-  path_data: ./gammapy-datasets/hess-dl3-dr1/data
-  gammapy_catalog: ./gammapy-datasets/catalogs/gammacat/gammacat.fits.gz
-  output_dir: ../outputs_dev
-  simulated_obs_dir: ../outputs_dev/datasets
-  save_name_obs: gaussian_background
-  save_name_suffix: 4_wobbles_10_mn_consecutive_runs_norm_10
+  path_data: <path_to_local_gammapy_data_copy>/hess-dl3-dr1/data # Path to dl3 files containing the full-enclosure IRFs
+  gammapy_catalog: <path_to_local_gammapy_data_copy>/catalogs/gammacat/gammacat.fits.gz
+  output_dir: ../outputs
+  subdir: crab_hess
 data:
-  real: False
   run_list: [] # None, array of obs_ids
   obs_pattern: '*_dl3_*.fits.gz'
-  cos_zenith_bin_edges: [-0.0, 0.25, 0.5, 0.75, 1.0] 
+  cos_zenith_bin_edges: [-0.0, 0.25, 0.5, 0.75, 1.0]      # Zenith binning used for the zenith binned model plotting
   cos_zenith_bin_centers:  [0.125, 0.375, 0.625, 0.875]
-wobbles:                                      # Add or remove the wobbles you want. The runs need to be in path_data dl3 files
-  wobble_1:
+wobbles:                                      # Add or remove the wobbles you want.
+  wobble_1:                                   # The runs are used to get the pointing infos. Numbers need to be in the dl3 files following <path_data>
     run: 23523
     seed: 42
   wobble_2:
@@ -28,30 +25,29 @@ wobbles:                                      # Add or remove the wobbles you wa
 simulation:
   n_run: 2                                    # per wobble
   livetime: 600                               # [s]
-  single_pointing: False                      # If true, only W1 observations are simulated
+  single_pointing: False                      # If true, only W1 observations are simulated (this is useful for tests)
   obs_collection_type: n_run_obs_per_wobble   # one_obs_per_wobble, n_run_obs_per_wobble
-  t_ref: '2024-10-05 23:00:00'
+  t_ref: '2024-10-05 23:00:00'                # The first run starting time. The altaz pointing will depend on this date
   delay: 600                                  # [s]
   time_oversampling: 300                      # [s] time step between subdatasets, i.e. maximum time step for background IRF evaluation
   fov_rotation_error_limit: 1                 # [deg] maximum estimated FoV rotation error before re-evaluation of the background IRF evaluation by gammapy
 source:
-  catalog_name: Crab nebula # Catalog name. If not found, will use coordinates given in config
+  catalog_name: Crab nebula                   # Catalog name. If not found, will use coordinates given in config
   coordinates:
     ra: 83.63308
     dec: 22.0145
-  flux_to_0: True # Set to True for background only simulated data
+  flux_to_0: True                             # Set to True for background only simulated data. If False, the source needs to be in Gammacat
   exclusion_region:
-    shape: n_circles # n_circles, ellipse, noexclusion
+    shape: n_circles                          # n_circles, ellipse, noexclusion
     n_circles:
       circle_1:       
         radius: 0.3
         ra: 83.63308
         dec: 22.0145
-    ellipse: # Centered on source by default
-      width: 0.2                              # [°]
-      height: 0.6                             # [°]
-      angle: 45                               # [°]
 background:
+  irf:
+    down_factor: 10
+    offset_factor: 2
   spectral_model:
     model: PowerLawNormSpectralModel
     factor: 2.4
@@ -79,33 +75,27 @@ background:
       width: 0.3                # [deg]
     fov:
       method: scale # scale, fit
-irf:
-  dimension: 3
-  collection: False
-  FoV_alignment: ALTAZ # ALTAZ, RADEC
-  down_factor: 10
-  offset_factor: 2
-dataset:
-  width_factor: 2.5
-  binsize: 0.02               # [deg]
 acceptance:
+  dimension: 3
+  tool: baccmod
   method: stack # stack,fit
-  collection: True
-  single_file_path: /fefs/aswg/workspace/ali.baktash/simulation_data/centered_full_gaussian/no_exlcusion/teststacked_exclusion_map.fits
+  out_collection: True
+  true_collection: False        # If False, the same background IRF is used as true irf for all observations
+  FoV_alignment: ALTAZ          # ALTAZ, RADEC
   energy:
     e_min: 0.5
     e_max: 10
     unit: TeV
     nbin: 3
   offset:
-    offset_max: 1.5           # [deg]
+    offset_max: 5.           # [deg]
     nbin: 7
   cos_zenith_binning:
     zenith_binning: False
     initial_cos_zenith_binning: 0.01
     runwise_normalisation: False
     cos_zenith_binning_method: min_livetime_per_wobble
-    cos_zenith_binning_parameter_value: 3000    # [s] if 'livetime' in method
+    cos_zenith_binning_parameter_value: 3000    # [s] if 'livetime' in method, n_obs if 'observation' in method
   fit:
     fnc: bilinear_gaussian2d
     bounds:
