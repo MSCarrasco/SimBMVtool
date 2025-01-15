@@ -1,5 +1,7 @@
 # Installation steps
 
+## Working environment with gammapy and BAccMod
+
 `git clone https://github.com/MSCarrasco/gammapy.git <path_to_gammapy_clone>`
 
 `cd <path_to_gammapy_clone>`
@@ -10,15 +12,19 @@
 
 `python -m pip install .`
 
-`git clone https://github.com/MSCarrasco/acceptance_modelisation.git <path_to_accmodel_clone>`
+`git clone https://github.com/MSCarrasco/BAccMod.git <path_to_BAccMod_clone>`
 
-`cd <path_to_accmodel_clone>`
-
-`git checkout SimBMVtool_compatible`
+`cd <path_to_BAccMod_clone>`
 
 `python setup.py install`
 
-`pip install seaborn`
+## SimBMVtool
+
+`git clone https://github.com/MSCarrasco/SimBMVtool.git <path_to_SimBMVtool_clone>`
+
+`git cd <path_to_SimBMVtool_clone>`
+
+`git checkout SimBMVtool_baccmod`
 
 `gammapy download datasets --out <path_to_local_gammapy_data_copy>`
 
