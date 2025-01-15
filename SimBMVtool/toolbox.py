@@ -1,0 +1,573 @@
+import os.path
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), '.'))
+
+import numpy as np
+import astropy.units as u
+from astropy.coordinates import SkyCoord,EarthLocation, angular_separation, position_angle,Angle
+from astropy.time import Time
+from astropy.visualization.wcsaxes import SphericalCircle
+import matplotlib.pyplot as plt
+from matplotlib.colors import CenteredNorm
+
+from copy import deepcopy
+import pandas as pd
+from pathlib import Path
+import os, pathlib
+import pickle as pk
+import seaborn as sns
+from itertools import product
+
+# %matplotlib inline
+
+from IPython.display import display
+from gammapy.data import FixedPointingInfo, Observations, Observation, PointingMode, ObservationTable
+from gammapy.datasets import MapDataset
+from gammapy.irf import load_irf_dict_from_file, Background2D, Background3D, FoVAlignment
+from gammapy.makers import MapDatasetMaker
+from gammapy.maps import MapAxis, WcsGeom, WcsNDMap
+from regions import CircleAnnulusSkyRegion, CircleSkyRegion
+from gammapy.estimators import ExcessMapEstimator
+
+from gammapy.data import DataStore
+
+from gammapy.modeling import Fit,Parameter
+from gammapy.modeling.models import (
+    FoVBackgroundModel,
+    GaussianSpatialModel,
+    Models,
+    SpatialModel,
+    PowerLawSpectralModel,
+    PowerLawNormSpectralModel,
+    LogParabolaSpectralModel,
+    SkyModel,
+)
+from gammapy.catalog import SourceCatalogGammaCat
+
+from scipy.stats import norm as norm_stats
+from gammapy.stats import CashCountsStatistic
+from gammapy.modeling import Parameter, Parameters
+from gammapy.utils.compat import COPY_IF_NEEDED
+
+fov_rotation_time_step = 100000 * u.s
+
+
+#-------------------------------------------------------------------------------------
+# Data management
+#-------------------------------------------------------------------------------------
+
+# Save/retrieve pickle data
+def any2pickle(save_path:str,data):
+    '''Save data in pickle format: no info loss'''
+    with open(save_path, 'wb') as f1:
+        pk.dump(data, f1)
+    print('Pickle file saved at '+ save_path)
+
+
+def pickle2any(save_path:str,datatype='dataframe'):
+    '''Read pickle data'''
+    path = pathlib.Path(save_path)
+    if path.exists():
+        if datatype=='dataframe': return pd.read_pickle(path)
+        else:
+            with open(os.fspath(path), 'rb') as f1:
+                dataframe = pk.load(f1)
+                return dataframe
+    else: 
+        print('Error : No pickle file found at '+ os.fspath(path))
+        return path.exists()
+
+#-------------------------------------------------------------------------------------
+# Observations
+#-------------------------------------------------------------------------------------
+
+def get_data_store(dir_path, pattern, from_index=False):
+    if from_index:
+        data_store = DataStore.from_dir(f"{dir_path}",hdu_table_filename=f'hdu-index{pattern}.fits.gz',obs_table_filename=f'obs-index{pattern}.fits.gz')
+    else:
+        path = Path(dir_path)
+        paths = sorted(list(path.rglob(pattern)))
+        data_store = DataStore.from_events_files(paths)
+    
+    return data_store
+
+def get_dfobs_table(obs_table:ObservationTable):
+    str_columns = ['OBJECT', 'OBS_MODE', 'TELLIST', 'INSTRUME']
+    datetime_columns = ['DATE-OBS', 'TIME-OBS', 'DATE-END', 'TIME-END']
+    datetime_formats = ["%Y-%m-%d","%H:%M:%S.%f","%Y-%m-%d","%H:%M:%S.%f"]
+    dfobs_table = obs_table.to_pandas().set_index("OBS_ID")
+    for col in str_columns: 
+        if col in dfobs_table.columns:
+            if (dfobs_table[col].apply(lambda x: isinstance(x, bytes)).all()): dfobs_table[col] = dfobs_table[col].str.decode('utf-8')
+    for col,format in zip(datetime_columns,datetime_formats): 
+        if col in dfobs_table.columns:
+            if 'TIME' in col:
+                if (dfobs_table[col].apply(lambda x: isinstance(x, bytes)).all()):
+                    col_strings = dfobs_table[col].str.decode('utf-8')
+                    if not np.any(col_strings == 'NOT AVAILABLE'):
+                        dfobs_table[col] = pd.to_datetime(col_strings,format=format).dt.time
+            elif 'DATE' in col:
+                if (dfobs_table[col].apply(lambda x: isinstance(x, bytes)).all()):
+                    col_strings = dfobs_table[col].str.decode('utf-8')
+                    if not np.any(col_strings == 'NOT AVAILABLE'):
+                        dfobs_table[col] = pd.to_datetime(col_strings,format=format).dt.date
+    return dfobs_table
+
+def get_obs_collection(dir_path,pattern,multiple_simulation_subdir=False,from_index=False,with_datastore=True, obs_ids=np.array([])):
+    path = Path(dir_path)
+    paths = sorted(list(path.rglob(pattern)))
+    obs_ids = None if (obs_ids.shape[0]==0) else obs_ids
+    if not multiple_simulation_subdir:
+        data_store = get_data_store(dir_path=dir_path, pattern=pattern, from_index=from_index)
+        obs_collection = data_store.get_observations(obs_id=obs_ids, required_irf=['aeff','edisp'])
+        if obs_collection[0].aeff is None:
+            irf_files = data_store.obs_table['IRF_FILENAME'].astype(str).data
+            if obs_ids is None: obs_ids = np.array(data_store.obs_table['OBS_ID'].data)
+            for iobs, obs_id in enumerate(obs_ids):
+                irf_dict = load_irf_dict_from_file(str(irf_files[0]))
+                if (obs_collection[iobs].aeff is None) & ('aeff' in irf_dict): obs_collection[iobs].aeff = irf_dict['aeff']
+                if (obs_collection[iobs].edisp is None) & ('edisp' in irf_dict): obs_collection[iobs].edisp = irf_dict['edisp']
+                if (obs_collection[iobs].psf is None) & ('psf' in irf_dict): obs_collection[iobs].psf = irf_dict['psf']
+                if (obs_collection[iobs].bkg is None) & ('bkg' in irf_dict): obs_collection[iobs].bkg = irf_dict['bkg']
+    else:
+        # This handles the case where multiple observations have the same obs_id
+        obs_collection = Observations()
+        for path in paths:
+            obs_collection.append(Observation.read(path))
+        for iobs in range(len(obs_collection)):
+            obs_id=iobs+1
+            obs_collection[iobs].events.table.meta['OBS_ID'] = obs_id
+            obs_collection[iobs].obs_id = obs_id
+    
+    if with_datastore:
+        return data_store, obs_collection
+    else: 
+        return obs_collection
+    
+def get_run_info(path_data:str, pattern:str, obs_id:int):
+    """returns array with [livetime,pointing_radec,file_name]"""
+    loc = EarthLocation.of_site('Roque de los Muchachos')
+    data_store = get_data_store(path_data, pattern)
+    obs_table = data_store.obs_table
+    livetime = obs_table[obs_table["OBS_ID"] == obs_id]["LIVETIME"].data[0]
+    ra = obs_table[obs_table["OBS_ID"] == obs_id]["RA_PNT"].data[0]
+    dec = obs_table[obs_table["OBS_ID"] == obs_id]["DEC_PNT"].data[0]
+    pointing= SkyCoord(ra=ra*u.deg,dec=dec*u.deg)
+    print(f"--Run {obs_id}--\nlivetime: {livetime}\npointing radec: {pointing}")
+    hdu_table = data_store.hdu_table
+    file_name = hdu_table[hdu_table["OBS_ID"]==obs_id]["FILE_NAME"][0]
+    return livetime, pointing, file_name
+
+#-------------------------------------------------------------------------------------
+# Simulation
+#-------------------------------------------------------------------------------------
+
+def get_empty_obs_simu(Bkg_irf, axis_info, run_info, src_models, path_data:str,flux_to_0=True, t_ref_str="2000-01-01 00:00:00", t_delay=0,verbose=False):
+    '''Loads irf from file and return a simulated observation with its associated dataset'''
+
+    loc, source_pos, run, livetime, pointing, file_name = run_info
+
+    # Loading IRFs
+    irfs = load_irf_dict_from_file(
+        f"{path_data}/{file_name}"
+    )
+    if Bkg_irf is not None: irfs['bkg'] = Bkg_irf
+    if verbose: [print(irfs[irf]) for irf in irfs]
+
+    if not isinstance(livetime, u.Quantity): livetime*=u.s
+
+    pointing_info = FixedPointingInfo(mode=PointingMode.POINTING, fixed_icrs=pointing)#,legacy_altaz=pointing_altaz)
+    t_ref=Time(t_ref_str)
+    delay=t_delay*u.s
+    # print(delay)
+    obs = Observation.create(
+        pointing=pointing_info, livetime=livetime,irfs=irfs, location=loc, obs_id='0',reference_time=t_ref,
+		tstart=delay,
+		tstop=delay + livetime,
+    )
+
+    obs._location = loc
+    obs._pointing = pointing_info
+    obs.pointing._location = loc
+    obs.aeff.meta["TELESCOP"] = "CTA_NORTH"
+    obs.aeff.meta['INSTRUME'] = 'Northern Array'
+
+    return obs
+
+def get_empty_dataset_and_obs_simu(Bkg_irf, axis_info, run_info, src_models, path_data:str,flux_to_0=True, t_ref_str="2000-01-01 00:00:00", t_delay=0,verbose=False):
+    '''Loads irf from file and return a simulated observation with its associated dataset'''
+
+    loc, source_pos, run, livetime, pointing, file_name = run_info
+    # print(livetime)
+    
+    if axis_info is not None: 
+        e_min, e_max, offset_max, nbin_offset= axis_info
+        energy_axis = MapAxis.from_energy_bounds(e_min, e_max, nbin=10, name='energy')
+        nbins_map = 2*nbin_offset
+    else:
+        energy_axis = Bkg_irf.axes[0]
+        e_min = energy_axis.edges.min()
+        e_max = energy_axis.edges.max()
+        offset_axis = Bkg_irf.axes[1]
+        offset_max = offset_axis.edges.max()
+        nbins_map = offset_axis.nbin
+    
+    binsize = offset_max / (nbins_map / 2)
+
+    # Loading IRFs
+    irfs = load_irf_dict_from_file(
+        f"{path_data}/{file_name}"
+    )
+
+    if Bkg_irf is not None: irfs['bkg'] = Bkg_irf
+    if verbose: [print(irfs[irf]) for irf in irfs]
+
+    if not isinstance(livetime, u.Quantity): livetime*=u.s
+
+    pointing_info = FixedPointingInfo(mode=PointingMode.POINTING, fixed_icrs=pointing)#,legacy_altaz=pointing_altaz)
+    t_ref=Time(t_ref_str)
+    delay=t_delay*u.s
+    # print(delay)
+    obs = Observation.create(
+        pointing=pointing_info, livetime=livetime, irfs=irfs, location=loc, obs_id='0',reference_time=t_ref,
+		tstart=delay,
+		tstop=delay + livetime,
+    )
+
+    obs._location = loc
+    obs._pointing = pointing_info
+    obs.pointing._location = loc
+    obs.aeff.meta["TELESCOP"] = "CTA_NORTH"
+    obs.aeff.meta['INSTRUME'] = 'Northern Array'
+
+    if verbose: print(obs.obs_info)
+
+    edisp_frac = 0.3
+    e_min_true,e_max_true = ((1-edisp_frac)*e_min , (1+edisp_frac)*e_max)
+    nbin_energy_map_true = 20
+
+    energy_axis_true = MapAxis.from_energy_bounds(
+        e_min_true, e_max_true, nbin=nbin_energy_map_true, per_decade=True, unit="TeV", name="energy_true"
+    )
+
+    migra_axis = MapAxis.from_bounds(-1, 2, nbin=150, node_type="edges", name="migra")
+
+    geom = WcsGeom.create(
+            skydir=(pointing.ra.degree,pointing.dec.degree),
+            binsz=binsize,
+            npix=(nbins_map, nbins_map),
+            frame="icrs",
+            proj="CAR",
+            axes=[energy_axis],
+        )
+    if verbose: print(geom)
+
+    empty = MapDataset.create(
+        geom,
+        energy_axis_true=energy_axis_true,
+        migra_axis=migra_axis,
+        name="my-dataset",
+    )
+
+    maker = MapDatasetMaker(selection=["exposure", "background", "edisp"], fov_rotation_error_limit=1 * u.deg)
+    dataset = maker.run(empty, obs)
+    if verbose: print(obs.obs_info)
+    if verbose: print(dataset)
+
+    # Models
+    spatial_model = src_models.spatial_model()
+
+    # Uncomment if you want to use the true source spectral model. Here we declare a model with an amplitude of 0 cm-2 s-1 TeV-1 to simulate only background
+    if not flux_to_0: spectral_model = src_models.spectral_model()
+    else: spectral_model = LogParabolaSpectralModel(
+            alpha=2,beta=0.2 / np.log(10), amplitude=0. * u.Unit("cm-2 s-1 TeV-1"), reference=1 * u.TeV
+    )
+
+    model_simu = SkyModel(
+        spatial_model=spatial_model,
+        spectral_model=spectral_model,
+        name=src_models.name,
+    )
+
+    # Here I have a doubt  about why I have to declare another model,
+    # but if I try to use our model, or no model at all, it doesn't work anymore
+    # In any case, I confirmed it is simulating according to the IRF model
+    bkg_model = FoVBackgroundModel(dataset_name="my-dataset")
+    #bkg_model.spectral_model.norm.value = 0.01
+    models = Models([model_simu,bkg_model])
+    dataset.models = models
+    if verbose: print(dataset.models)
+
+    return dataset,obs
+
+def stack_with_meta(eventlist1, eventlist2):
+    meta1 = deepcopy(eventlist1.table.meta)
+    meta2 = deepcopy(eventlist2.table.meta)
+    eventlist1.stack(eventlist2)
+    eventlist1.table.meta['TSTART'] = np.min([meta1['TSTART'], meta2['TSTART']])
+    eventlist1.table.meta['TSTOP'] = np.max([meta1['TSTOP'], meta2['TSTOP']])
+    eventlist1.table.meta['TELAPSED'] = eventlist1.table.meta['TSTOP']- eventlist1.table.meta['TSTART']
+    eventlist1.table.meta['ONTIME'] = meta1['ONTIME'] + meta2['ONTIME']
+    eventlist1.table.meta['LIVETIME'] = meta1['LIVETIME'] + meta2['LIVETIME']
+    return eventlist1
+
+#-------------------------------------------------------------------------------------
+# Skymaps
+#-------------------------------------------------------------------------------------
+
+def get_geom(Bkg_irf, axis_info, pointing_radec):
+    '''Return geom from bkg_irf axis or a set of given axis edges'''
+    
+    if axis_info is not None: 
+        e_min, e_max, offset_max, nbin_offset= axis_info
+        energy_axis = MapAxis.from_energy_bounds(e_min, e_max, nbin=10, name='energy')
+        nbins_map = 2*nbin_offset
+    else:
+        energy_axis = Bkg_irf.axes[0]
+        e_min = energy_axis.edges.min()
+        e_max = energy_axis.edges.max()
+        offset_axis = Bkg_irf.axes[1]
+        offset_max = offset_axis.edges.max()
+        nbins_map = offset_axis.nbin
+    
+    binsize = offset_max / (nbins_map / 2)
+    if not isinstance(pointing_radec, SkyCoord): pointing_radec= SkyCoord(pointing_radec[0] * u.degree, pointing_radec[1] * u.degree)
+    
+    geom = WcsGeom.create(
+            skydir=(pointing_radec.ra.degree, pointing_radec.dec.degree),
+            binsz=binsize,
+            npix=(nbins_map, nbins_map),
+            frame='icrs',
+            proj="CAR",
+            axes=[energy_axis],
+        )
+    return geom
+
+def get_exclusion_mask_from_dataset_geom(dataset, exclude_regions):
+    geom_map = dataset.geoms['geom']
+    energy_axis_map = dataset.geoms['geom'].axes[0]
+    geom_image = geom_map.to_image().to_cube([energy_axis_map.squash()])
+    exclusion_mask = geom_image.region_mask(exclude_regions, inside=False)
+    return exclusion_mask
+
+def get_lima_maps(dataset, correlation_radius, correlate_off):
+    estimator = ExcessMapEstimator(correlation_radius*u.deg, correlate_off=correlate_off)
+    lima_maps = estimator.run(dataset)
+    return lima_maps
+
+def get_dataset_maps_dict(dataset, results=['counts','background']):
+    maps = {}
+    if 'counts' in results: maps['counts'] = dataset.counts.sum_over_axes()
+    if 'background' in results: maps['background'] = dataset.background.sum_over_axes()
+    return maps
+
+def get_high_level_maps_dict(lima_maps, exclusion_mask, results=['significance_all']):
+    '''results='all', ['significance_all','significance_off','excess']'''
+    if results == 'all': results = ['significance_all','significance_off','excess']
+    
+    significance_map = lima_maps["sqrt_ts"]
+    excess_map = lima_maps["npred_excess"]
+    
+    maps = {}
+    if 'significance_all' in results: maps['significance_all'] = significance_map
+    if 'significance_off' in results: maps['significance_off'] = significance_map * exclusion_mask
+    if 'excess' in results: maps['excess'] = excess_map
+    # Residuals
+    if results == 'all':
+        significance_all = maps["significance_all"].data[np.isfinite(maps["significance_all"].data)]
+        significance_off = maps["significance_off"].data[np.logical_and(np.isfinite(maps["significance_all"].data), 
+                                                                exclusion_mask.data)]
+        emin_map, emax_map = significance_all.geom.axes['energy'].bounds
+        
+        fig, ax1 = plt.subplots(figsize=(4,4))
+        ax1.hist(
+            significance_all,
+            range=(-8,8),
+            density=True,
+            alpha=0.5,
+            color="red",
+            label="all bins",
+            bins=30,
+        )
+
+        ax1.hist(
+            significance_off,
+            range=(-8,8),
+            density=True,
+            alpha=0.5,
+            color="blue",
+            label="off bins",
+            bins=30,
+        )
+
+        # Now, fit the off distribution with a Gaussian
+        mu, std = norm_stats.fit(significance_off)
+        x = np.linspace(-8, 8, 30)
+        p = norm_stats.pdf(x, mu, std)
+        ax1.plot(x, p, lw=2, color="black")
+        p2 = norm_stats.pdf(x, 0, 1)
+        #ax.plot(x, p2, lw=2, color="green")
+        ax1.set_title(f"Background residuals map E= {emin_map:.1f} - {emax_map:.1f}")
+        ax1.text(-2.,0.001, f'mu = {mu:3.2f}\nstd={std:3.2f}',fontsize=14, fontweight='bold')
+        ax1.legend()
+        ax1.set_xlabel("Significance")
+        ax1.set_yscale("log")
+        ax1.set_ylim(1e-5, 1)
+        ax1.set_xlim(-5,6.)
+        #xmin, xmax = np.min(significance_off), np.max(significance_off)
+        #ax.set_xlim(xmin, xmax)
+        print("mu = ", mu," std= ",std )
+        plt.tight_layout()
+        maps["residuals_histogram"] = fig
+
+    return maps
+
+def get_high_level_maps_from_dataset(dataset, exclude_regions, correlation_radius, correlate_off, results):
+    exclusion_mask = get_exclusion_mask_from_dataset_geom(dataset, exclude_regions)
+    lima_maps = get_lima_maps(dataset, correlation_radius, correlate_off)
+    maps = get_high_level_maps_dict(lima_maps, exclusion_mask, results)
+    return maps
+
+def get_skymaps_dict(dataset, exclude_regions, correlation_radius, correlate_off, results):
+    '''results='all', ['counts', 'background','significance_all','significance_off','excess']'''
+    
+    if results == 'all': results=['counts', 'background', 'significance_all', 'significance_off', 'excess']
+    
+    dataset_bool = 1*(('counts' in results) or ('background' in results))
+    estimator_bool = -1*(('significance_all' in results) or ('significance_off' in results) or ('excess' in results))
+    i_method = dataset_bool + estimator_bool # methods = {1: 'dataset_only', -1: 'estimator_only', 0: 'both'}
+    
+    if i_method >= 0: maps_dataset = get_dataset_maps_dict(dataset, results)
+    if i_method <= 0: maps_high_level = get_high_level_maps_from_dataset(dataset, exclude_regions, correlation_radius, correlate_off, results)
+
+    if i_method==0:  
+        maps_both = maps_dataset.copy()
+        maps_both.update(maps_high_level)
+        return maps_both
+    elif i_method==1: return maps_dataset
+    else: return maps_high_level
+
+def plot_skymap_from_dict(skymaps, key, crop_width=0 * u.deg, ring_bkg_param=None, figsize=(5,5)):
+    skymaps_args = {
+        'counts': {
+            'cbar_label': 'events',
+            'title': 'Counts map'
+        },
+        'background': {
+            'cbar_label': 'events',
+            'title': 'Background map'
+        },
+        'significance_all': {
+            'cbar_label': 'significance [$\sigma$]',
+            'title': 'Significance map'
+        },
+        'significance_off': {
+            'cbar_label': 'significance [$\sigma$]',
+            'title': 'Off significance map'
+        },
+        'excess': {
+            'cbar_label': 'events',
+            'title': 'Excess map'
+        }
+    }
+
+    skymap = skymaps[key]
+    if crop_width != 0 * u.deg:
+        width = 0.5 * skymap.geom.width[0][0]
+        binsize = width / (0.5 * skymap.data.shape[-1])
+        n_crop_px = int(((width - crop_width)/binsize).value)
+        skymap = skymap.crop(n_crop_px)
+    
+    cbar_label, title = (skymaps_args[key]["cbar_label"], skymaps_args[key]["title"])
+    
+    fig,ax=plt.subplots(figsize=figsize,subplot_kw={"projection": skymap.geom.wcs})
+    if (key=='counts') or (key=='background'): skymap.plot(ax=ax, add_cbar=True, stretch="linear",kwargs_colorbar={'label': cbar_label})
+    elif key == 'excess': skymap.plot(ax=ax, add_cbar=True, stretch="linear", cmap='magma',kwargs_colorbar={'label': cbar_label})
+    elif 'significance' in key: 
+        skymap.plot(ax=ax, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma',kwargs_colorbar={'label': cbar_label})
+        maxsig = np.nanmax(skymap.data)
+        minsig = np.nanmin(skymap.data)
+        im = ax.images        
+        cb = im[-1].colorbar 
+        cb.ax.axhline(maxsig, c='g')
+        cb.ax.text(1.1,maxsig - 0.07,' max', color = 'g')
+        cb.ax.axhline(minsig, c='g')
+        cb.ax.text(1.1,minsig - 0.07,' min', color = 'g')
+    if (ring_bkg_param is not None):
+            if hasattr(ring_bkg_param,'__len__') & (len(ring_bkg_param)==2):
+                int_rad, width = ring_bkg_param
+                ring_center_pos = SkyCoord(ra=skymap._geom.center_coord[0],dec=skymap._geom.center_coord[1],frame='icrs')
+                r2 = SphericalCircle(ring_center_pos, int_rad * u.deg,
+                                    edgecolor='white', facecolor='none',
+                                    transform=ax.get_transform('icrs'))
+                r3 = SphericalCircle(ring_center_pos, int_rad * u.deg + width * u.deg,
+                                    edgecolor='white', facecolor='none',
+                                    transform=ax.get_transform('icrs'))
+                ax.add_patch(r2)
+                ax.add_patch(r3)
+    ax.set(title=title)
+    plt.tight_layout()
+    plt.show()
+
+
+#-------------------------------------------------------------------------------------
+# Model validation
+#-------------------------------------------------------------------------------------
+    
+def get_value_at_threshold(data_to_bin,weights,threshold_percent,plot=False):
+    # Filter NaN values
+    data_to_bin_filtered = data_to_bin[~np.isnan(weights)]
+    weights_filtered = weights[~np.isnan(weights)]
+
+    # Compute histogram with weights
+    counts, bin_edges = np.histogram(data_to_bin_filtered, bins=22, weights=weights_filtered)
+
+    # Calculate cumulative sum of the histogram
+    cumulative_counts = np.cumsum(counts)
+    total_area = cumulative_counts[-1]
+
+    # Find the x-axis value where cumulative sum reaches 90% of the total area
+    threshold = threshold_percent/100 * total_area
+    index_thr = np.searchsorted(cumulative_counts, threshold)
+    data_value_at_thr = bin_edges[index_thr]
+
+    if plot:
+        # Plot the histogram
+        fig, ax = plt.subplots(figsize=(4, 3))
+        ax.hist(data_to_bin_filtered, weights=weights_filtered, bins=22)
+        ax.axvline(x=data_value_at_thr, color='r', linestyle='--', label=f'{threshold_percent}% area at r={data_value_at_thr:.2f}°')
+        ax.legend()
+        ax.set_title(f"Histogram with {threshold_percent}% Area Marker")
+        plt.show()
+    return data_value_at_thr
+
+def compute_residuals(out, true, residuals='diff/true',res_lim_for_nan=0.9) -> np.array:
+    res_arr = np.zeros_like(true)
+    for iEbin in range(true.shape[0]):
+        diff = out[iEbin,:,:] - true[iEbin,:,:]
+        true[iEbin,:,:][true[iEbin,:,:] == 0.0] = np.nan
+        res = diff / true[iEbin,:,:]
+        diff[np.abs(res) >= res_lim_for_nan] = np.nan # Limit to mask bins with "almost zero" statistics for truth model and 0 output count
+        # Caveat: this will also mask very large bias, but the pattern should be visibly different
+
+        if residuals == "diff/true": res = diff / true[iEbin,:,:]
+        elif residuals == "diff/sqrt(true)": res = diff / np.sqrt(true[iEbin,:,:])
+
+        # res[true[iEbin,:,:] == 0] = np.nan
+        res_arr[iEbin,:,:] += res
+    return res_arr
+
+#-------------------------------------------------------------------------------------
+# Misc
+#-------------------------------------------------------------------------------------
+
+def scale_value(x,xlim,ylim):
+    y_min = ylim[0]
+    y_max = ylim[1]
+    x_min = xlim[0]
+    x_max = xlim[1]
+    
+    # Apply the linear mapping formula
+    y = (x - x_min) * ((y_max - y_min) / (x_max - x_min)) + y_min
+    
+    return y
