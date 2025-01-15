@@ -22,7 +22,7 @@
 
 `git clone https://github.com/MSCarrasco/SimBMVtool.git <path_to_SimBMVtool_clone>`
 
-`git cd <path_to_SimBMVtool_clone>`
+`cd <path_to_SimBMVtool_clone>`
 
 `git checkout SimBMVtool_baccmod`
 
