@@ -1,7 +1,7 @@
 ---
 paths:
-  path_data: <path_to_local_gammapy_data_copy>/hess-dl3-dr1/data # Path to dl3 files containing the full-enclosure IRFs
-  gammapy_catalog: <path_to_local_gammapy_data_copy>/catalogs/gammacat/gammacat.fits.gz
+  path_data: ./gammapy-datasets/dev/hess-dl3-dr1/data # Path to dl3 files containing the full-enclosure IRFs
+  gammapy_catalog: ./gammapy-datasets/dev/catalogs/gammacat/gammacat.fits.gz
   output_dir: ../outputs
   subdir: crab_hess
 data:

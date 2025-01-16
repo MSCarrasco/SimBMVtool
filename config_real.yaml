@@ -1,16 +1,16 @@
 ---
 paths:
-  path_data: <path_to_dl3>
-  gammapy_catalog: <path_to_local_gammapy_data_copy>/catalogs/gammacat/gammacat.fits.gz 
-  output_dir: ../outputs
-  subdir: crab_school
+  path_data: ./crab_LZA_data
+  gammapy_catalog: ./gammapy_datasets/dev/catalogs/gammacat/gammacat.fits.gz 
+  output_dir: ./outputs
+  subdir: crab_LZA
 data:
   run_list: [] # None, array of obs_ids
   obs_pattern: dl3_*
   cos_zenith_bin_edges: [-0.0, 0.25, 0.5, 0.75, 1.0] 
   cos_zenith_bin_centers:  [0.125, 0.375, 0.625, 0.875]
 source:
-  catalog_name: Crab Nebula # Gammacat name. If not found, will use coordinates given in config
+  catalog_name: Crab # Gammacat name. If not found, will use coordinates given in config
   coordinates:
     ra: 83.63308
     dec: 22.0145
@@ -41,13 +41,13 @@ acceptance:
   out_collection: True
   FoV_alignment: ALTAZ # ALTAZ, RADEC
   energy:
-    e_min: 0.1
-    e_max: 40
+    e_min: 1
+    e_max: 15
     unit: TeV
     nbin: 3
   offset:
     offset_max: 2.5           # [deg]
-    nbin: 11
+    nbin: 6
   cos_zenith_binning:
     zenith_binning: False
     initial_cos_zenith_binning: 0.01
