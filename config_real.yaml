@@ -44,10 +44,10 @@ acceptance:
     e_min: 0.1
     e_max: 40
     unit: TeV
-    nbin: 11
+    nbin: 3
   offset:
     offset_max: 2.5           # [deg]
-    nbin: 6
+    nbin: 11
   cos_zenith_binning:
     zenith_binning: False
     initial_cos_zenith_binning: 0.01
