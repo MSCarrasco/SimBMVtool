@@ -1,7 +1,7 @@
 ---
 paths:
   path_data: ./crab_LZA_data
-  gammapy_catalog: ./gammapy_datasets/dev/catalogs/gammacat/gammacat.fits.gz 
+  gammapy_catalog: gammapy_datasets/dev/catalogs/gammacat/gammacat.fits.gz 
   output_dir: ./outputs
   subdir: crab_LZA
 data:
