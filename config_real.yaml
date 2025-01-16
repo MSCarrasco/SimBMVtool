@@ -41,10 +41,10 @@ acceptance:
   out_collection: True
   FoV_alignment: ALTAZ # ALTAZ, RADEC
   energy:
-    e_min: 1
-    e_max: 15
+    e_min: 0.1
+    e_max: 40
     unit: TeV
-    nbin: 3
+    nbin: 11
   offset:
     offset_max: 2.5           # [deg]
     nbin: 6
