@@ -1077,7 +1077,6 @@ class BMVCreator(BaseSimBMVtoolCreator):
                 title = f"Zenith binned averaged model data\nzd = {zd_bin_center:.1f}°, {self.obs_in_coszd_bin[icos].shape[0]} runs"
                 if fig_save_path == '': fig_save_path_zd_bin=f"{self.plots_dir}/averaged_binned_acceptance_zd_{zd_bin_center:.0f}.png"
                 else:  fig_save_path_zd_bin=f"{fig_save_path[:-4]}_{zd_bin_center:.0f}.png"
-                print(fig_save_path_zd_bin)
                 self.plot_model(data=data, irf=irf, residuals=residuals, profile=profile, downsampled=True, i_irf=cos_center, zenith_binned=True, title=title, fig_save_path=fig_save_path_zd_bin, plot_hist=False)
     
     def plot_zenith_binned_data(self, data='livetime', per_wobble=True):
