@@ -13,7 +13,7 @@ from matplotlib.colors import CenteredNorm
 from copy import deepcopy
 import pandas as pd
 from pathlib import Path
-import os, pathlib
+import os, pathlib, yaml
 import pickle as pk
 import seaborn as sns
 from itertools import product
@@ -22,12 +22,12 @@ from itertools import product
 
 from IPython.display import display
 from gammapy.data import FixedPointingInfo, Observations, Observation, PointingMode, ObservationTable
-from gammapy.datasets import MapDataset
+from gammapy.datasets import MapDataset, MapDatasetOnOff
 from gammapy.irf import load_irf_dict_from_file, Background2D, Background3D, FoVAlignment
 from gammapy.makers import MapDatasetMaker
 from gammapy.maps import MapAxis, WcsGeom, WcsNDMap
-from regions import CircleAnnulusSkyRegion, CircleSkyRegion
-from gammapy.estimators import ExcessMapEstimator
+from regions import CircleAnnulusSkyRegion, CircleSkyRegion, Regions
+from gammapy.estimators import ExcessMapEstimator, TSMapEstimator
 
 from gammapy.data import DataStore
 
@@ -44,6 +44,8 @@ from gammapy.modeling.models import (
 )
 from gammapy.catalog import SourceCatalogGammaCat
 
+from scipy.special import erfcinv, erfinv
+from scipy.stats import chi2
 from scipy.stats import norm as norm_stats
 from gammapy.stats import CashCountsStatistic
 from gammapy.modeling import Parameter, Parameters
@@ -77,6 +79,17 @@ def pickle2any(save_path:str,datatype='dataframe'):
         print('Error : No pickle file found at '+ os.fspath(path))
         return path.exists()
 
+def load_yaml(save_path:str):
+    '''Read yaml file'''
+    path = Path(save_path)
+    if path.exists():
+        with open(save_path, 'r') as file:
+            yaml_file = yaml.safe_load(file)
+            return yaml_file
+    else: 
+        print('Error : No yaml file found at '+ os.fspath(path))
+        return path.exists()
+
 #-------------------------------------------------------------------------------------
 # Observations
 #-------------------------------------------------------------------------------------
@@ -88,6 +101,10 @@ def get_data_store(dir_path, pattern, from_index=False):
         path = Path(dir_path)
         paths = sorted(list(path.rglob(pattern)))
         data_store = DataStore.from_events_files(paths)
+    
+    for i in range(len(data_store.hdu_table)):
+        if data_store.hdu_table["HDU_NAME"][i] == 'POINT SPREAD FUNCTION': data_store.hdu_table["HDU_NAME"][i] = 'PSF'
+        if data_store.hdu_table["HDU_CLASS"][i] == 'psf_3gauss': data_store.hdu_table["HDU_CLASS"][i] = 'psf_table'
     
     return data_store
 
@@ -201,9 +218,13 @@ def get_empty_dataset_and_obs_simu(Bkg_irf, axis_info, run_info, src_models, pat
     # print(livetime)
     
     if axis_info is not None: 
-        e_min, e_max, offset_max, nbin_offset= axis_info
-        energy_axis = MapAxis.from_energy_bounds(e_min, e_max, nbin=10, name='energy')
-        nbins_map = 2*nbin_offset
+        e_min, e_max, nbin_E, offset_max, width = axis_info
+        energy_axis = MapAxis.from_energy_edges(
+            np.logspace(np.log10(e_min.to_value(u.TeV)), np.log10(e_max.to_value(u.TeV)), nbin_E)*u.TeV,
+            name="energy",
+        )
+        binsz = 0.02
+        npix = (int(width[0]/binsz), int(width[1]/binsz))
     else:
         energy_axis = Bkg_irf.axes[0]
         e_min = energy_axis.edges.min()
@@ -211,9 +232,10 @@ def get_empty_dataset_and_obs_simu(Bkg_irf, axis_info, run_info, src_models, pat
         offset_axis = Bkg_irf.axes[1]
         offset_max = offset_axis.edges.max()
         nbins_map = offset_axis.nbin
+        npix = (nbins_map, nbins_map)
+        width = offset_max.to_value(u.deg) * 2
+        binsz = width / nbins_map
     
-    binsize = offset_max / (nbins_map / 2)
-
     # Loading IRFs
     irfs = load_irf_dict_from_file(
         f"{path_data}/{file_name}"
@@ -252,14 +274,16 @@ def get_empty_dataset_and_obs_simu(Bkg_irf, axis_info, run_info, src_models, pat
 
     migra_axis = MapAxis.from_bounds(-1, 2, nbin=150, node_type="edges", name="migra")
 
+    # Create the geometry with the additional axes
     geom = WcsGeom.create(
-            skydir=(pointing.ra.degree,pointing.dec.degree),
-            binsz=binsize,
-            npix=(nbins_map, nbins_map),
-            frame="icrs",
-            proj="CAR",
-            axes=[energy_axis],
-        )
+        skydir=(pointing.ra.degree,pointing.dec.degree),
+        binsz=binsz, 
+        npix=npix,
+        frame="icrs",
+        proj="CAR",
+        axes=[energy_axis],
+    )
+
     if verbose: print(geom)
 
     empty = MapDataset.create(
@@ -275,10 +299,13 @@ def get_empty_dataset_and_obs_simu(Bkg_irf, axis_info, run_info, src_models, pat
     if verbose: print(dataset)
 
     # Models
-    spatial_model = src_models.spatial_model()
+    try: spatial_model = src_models.spatial_model() # If source models from Catalog object
+    except: spatial_model = src_models.spatial_model    # If source models from SkyRegion object
 
     # Uncomment if you want to use the true source spectral model. Here we declare a model with an amplitude of 0 cm-2 s-1 TeV-1 to simulate only background
-    if not flux_to_0: spectral_model = src_models.spectral_model()
+    if not flux_to_0: 
+        try: spectral_model = src_models.spectral_model()
+        except: spectral_model = src_models.spectral_model
     else: spectral_model = LogParabolaSpectralModel(
             alpha=2,beta=0.2 / np.log(10), amplitude=0. * u.Unit("cm-2 s-1 TeV-1"), reference=1 * u.TeV
     )
@@ -315,13 +342,32 @@ def stack_with_meta(eventlist1, eventlist2):
 # Skymaps
 #-------------------------------------------------------------------------------------
 
+def get_regions_from_dict(regions_dict:dict):
+    '''Takes a dictionnary with SkyRegion parameters and returns list of regions
+    Supported regions: circle, ellipse, rectangle
+    Note that BAccMod doesn't handle rectangle regions yet'''
+    regions_ds9 = ""
+    n_regions = len(regions_dict)
+    for iregion, region_key in enumerate(regions_dict):
+        shape = region_key.split("_")[0]
+        region = regions_dict[region_key]
+        if shape == "circle": regions_ds9 += f"icrs;circle({region['ra']}, {region['dec']}, {region['radius']})"
+        elif shape == "ellipse": regions_ds9 += f"icrs;ellipse({region['ra']}, {region['dec']}, {0.5*region['width']}, {0.5*region['height']}, {0.5*region['angle']})"
+        elif shape == "rectangle": regions_ds9 += f"icrs;box({region['ra']}, {region['dec']}, {region['width']}, {region['height']}, {region['angle']})"
+        if iregion < n_regions - 1: regions_ds9 += ";"
+    return Regions.parse(regions_ds9, format="ds9")
+
 def get_geom(Bkg_irf, axis_info, pointing_radec):
     '''Return geom from bkg_irf axis or a set of given axis edges'''
     
     if axis_info is not None: 
-        e_min, e_max, offset_max, nbin_offset= axis_info
-        energy_axis = MapAxis.from_energy_bounds(e_min, e_max, nbin=10, name='energy')
-        nbins_map = 2*nbin_offset
+        e_min, e_max, nbin_E, offset_max, width = axis_info
+        energy_axis = MapAxis.from_energy_edges(
+            np.logspace(np.log10(e_min.to_value(u.TeV)), np.log10(e_max.to_value(u.TeV)), nbin_E)*u.TeV,
+            name="energy",
+        )
+        binsz = 0.02
+        npix = (int(width[0]/binsz), int(width[1]/binsz))
     else:
         energy_axis = Bkg_irf.axes[0]
         e_min = energy_axis.edges.min()
@@ -329,14 +375,16 @@ def get_geom(Bkg_irf, axis_info, pointing_radec):
         offset_axis = Bkg_irf.axes[1]
         offset_max = offset_axis.edges.max()
         nbins_map = offset_axis.nbin
+        npix = (nbins_map, nbins_map)
+        width = offset_max.to_value(u.deg) * 2
+        binsz = width / nbins_map
     
-    binsize = offset_max / (nbins_map / 2)
     if not isinstance(pointing_radec, SkyCoord): pointing_radec= SkyCoord(pointing_radec[0] * u.degree, pointing_radec[1] * u.degree)
     
     geom = WcsGeom.create(
             skydir=(pointing_radec.ra.degree, pointing_radec.dec.degree),
-            binsz=binsize,
-            npix=(nbins_map, nbins_map),
+            binsz=binsz,
+            npix=npix,
             frame='icrs',
             proj="CAR",
             axes=[energy_axis],
@@ -350,9 +398,16 @@ def get_exclusion_mask_from_dataset_geom(dataset, exclude_regions):
     exclusion_mask = geom_image.region_mask(exclude_regions, inside=False)
     return exclusion_mask
 
-def get_lima_maps(dataset, correlation_radius, correlate_off):
-    estimator = ExcessMapEstimator(correlation_radius*u.deg, correlate_off=correlate_off)
-    lima_maps = estimator.run(dataset)
+def get_lima_maps(stacked_dataset, correlation_radius, correlate_off, estimator='excess', model_source=None):
+    if estimator=='excess': map_estimator = ExcessMapEstimator(correlation_radius*u.deg, correlate_off=correlate_off)
+    elif estimator=='ts':
+        if isinstance(stacked_dataset, MapDatasetOnOff): stacked_dataset = stacked_dataset.to_map_dataset()
+        map_estimator = TSMapEstimator(
+                                        model_source,
+                                        kernel_width=correlation_radius * u.deg,
+                                        energy_edges=stacked_dataset._geom.axes['energy'].bounds,
+                                    )
+    lima_maps = map_estimator.run(stacked_dataset)
     return lima_maps
 
 def get_dataset_maps_dict(dataset, results=['counts','background']):
@@ -361,84 +416,42 @@ def get_dataset_maps_dict(dataset, results=['counts','background']):
     if 'background' in results: maps['background'] = dataset.background.sum_over_axes()
     return maps
 
-def get_high_level_maps_dict(lima_maps, exclusion_mask, results=['significance_all']):
-    '''results='all', ['significance_all','significance_off','excess']'''
-    if results == 'all': results = ['significance_all','significance_off','excess']
+def get_high_level_maps_dict(lima_maps, exclusion_mask, exclusion_mask_not_source=None, results=['significance_all']):
+    '''results='all', ['significance_all','significance_off','excess','ts','flux']'''
+    if results == 'all': results = ['significance_all','significance_off','excess','ts','flux']
     
+    ts_map = lima_maps["ts"]
     significance_map = lima_maps["sqrt_ts"]
     excess_map = lima_maps["npred_excess"]
+    flux_map = lima_maps["flux"]
     
     maps = {}
-    if 'significance_all' in results: maps['significance_all'] = significance_map
+    if 'significance_all' in results: maps['significance_all'] = significance_map if exclusion_mask_not_source is None else significance_map * exclusion_mask_not_source
     if 'significance_off' in results: maps['significance_off'] = significance_map * exclusion_mask
     if 'excess' in results: maps['excess'] = excess_map
-    # Residuals
-    if results == 'all':
-        significance_all = maps["significance_all"].data[np.isfinite(maps["significance_all"].data)]
-        significance_off = maps["significance_off"].data[np.logical_and(np.isfinite(maps["significance_all"].data), 
-                                                                exclusion_mask.data)]
-        emin_map, emax_map = significance_all.geom.axes['energy'].bounds
-        
-        fig, ax1 = plt.subplots(figsize=(4,4))
-        ax1.hist(
-            significance_all,
-            range=(-8,8),
-            density=True,
-            alpha=0.5,
-            color="red",
-            label="all bins",
-            bins=30,
-        )
-
-        ax1.hist(
-            significance_off,
-            range=(-8,8),
-            density=True,
-            alpha=0.5,
-            color="blue",
-            label="off bins",
-            bins=30,
-        )
-
-        # Now, fit the off distribution with a Gaussian
-        mu, std = norm_stats.fit(significance_off)
-        x = np.linspace(-8, 8, 30)
-        p = norm_stats.pdf(x, mu, std)
-        ax1.plot(x, p, lw=2, color="black")
-        p2 = norm_stats.pdf(x, 0, 1)
-        #ax.plot(x, p2, lw=2, color="green")
-        ax1.set_title(f"Background residuals map E= {emin_map:.1f} - {emax_map:.1f}")
-        ax1.text(-2.,0.001, f'mu = {mu:3.2f}\nstd={std:3.2f}',fontsize=14, fontweight='bold')
-        ax1.legend()
-        ax1.set_xlabel("Significance")
-        ax1.set_yscale("log")
-        ax1.set_ylim(1e-5, 1)
-        ax1.set_xlim(-5,6.)
-        #xmin, xmax = np.min(significance_off), np.max(significance_off)
-        #ax.set_xlim(xmin, xmax)
-        print("mu = ", mu," std= ",std )
-        plt.tight_layout()
-        maps["residuals_histogram"] = fig
+    if 'ts' in results: maps['ts'] = ts_map
+    if 'flux' in results: maps['flux'] = flux_map
 
     return maps
 
-def get_high_level_maps_from_dataset(dataset, exclude_regions, correlation_radius, correlate_off, results):
+def get_high_level_maps_from_dataset(dataset, exclude_regions, exclude_regions_not_source, correlation_radius, correlate_off, results, estimator='excess', model_source=None):
     exclusion_mask = get_exclusion_mask_from_dataset_geom(dataset, exclude_regions)
-    lima_maps = get_lima_maps(dataset, correlation_radius, correlate_off)
-    maps = get_high_level_maps_dict(lima_maps, exclusion_mask, results)
+    exclusion_mask_not_source = get_exclusion_mask_from_dataset_geom(dataset, exclude_regions_not_source)
+    lima_maps = get_lima_maps(dataset, correlation_radius, correlate_off, estimator, model_source)
+    maps = get_high_level_maps_dict(lima_maps, exclusion_mask, exclusion_mask_not_source, results)
     return maps
 
-def get_skymaps_dict(dataset, exclude_regions, correlation_radius, correlate_off, results):
-    '''results='all', ['counts', 'background','significance_all','significance_off','excess']'''
+def get_skymaps_dict(dataset, exclude_regions, exclude_regions_not_source, correlation_radius, correlate_off, results, estimator='excess', model_source=None):
+    '''results='all', ['counts', 'background','significance_all','significance_off','excess','ts','flux']'''
     
-    if results == 'all': results=['counts', 'background', 'significance_all', 'significance_off', 'excess']
+    if results == 'all': results=['counts', 'background', 'significance_all', 'significance_off', 'excess', 'ts', 'flux']
     
     dataset_bool = 1*(('counts' in results) or ('background' in results))
-    estimator_bool = -1*(('significance_all' in results) or ('significance_off' in results) or ('excess' in results))
+    estimator_bool = -1*(('significance_all' in results) or ('significance_off' in results) or ('excess' in results) or ('ts' in results) or ('flux' in results))
     i_method = dataset_bool + estimator_bool # methods = {1: 'dataset_only', -1: 'estimator_only', 0: 'both'}
     
     if i_method >= 0: maps_dataset = get_dataset_maps_dict(dataset, results)
-    if i_method <= 0: maps_high_level = get_high_level_maps_from_dataset(dataset, exclude_regions, correlation_radius, correlate_off, results)
+    if i_method <= 0: maps_high_level = get_high_level_maps_from_dataset(dataset, exclude_regions, exclude_regions_not_source, correlation_radius, correlate_off, results, estimator, model_source)
 
     if i_method==0:  
         maps_both = maps_dataset.copy()
@@ -468,6 +481,14 @@ def plot_skymap_from_dict(skymaps, key, crop_width=0 * u.deg, ring_bkg_param=Non
         'excess': {
             'cbar_label': 'events',
             'title': 'Excess map'
+        },
+        'ts': {
+            'cbar_label': 'TS',
+            'title': 'TS map'
+        },
+        'flux': {
+            'cbar_label': 'flux [$s^{-1}cm^{-2}$]',
+            'title': 'Flux map'
         }
     }
 
@@ -481,10 +502,11 @@ def plot_skymap_from_dict(skymaps, key, crop_width=0 * u.deg, ring_bkg_param=Non
     cbar_label, title = (skymaps_args[key]["cbar_label"], skymaps_args[key]["title"])
     
     fig,ax=plt.subplots(figsize=figsize,subplot_kw={"projection": skymap.geom.wcs})
-    if (key=='counts') or (key=='background'): skymap.plot(ax=ax, add_cbar=True, stretch="linear",kwargs_colorbar={'label': cbar_label})
-    elif key == 'excess': skymap.plot(ax=ax, add_cbar=True, stretch="linear", cmap='magma',kwargs_colorbar={'label': cbar_label})
+    if key in ['counts', 'background']: skymap.plot(ax=ax, add_cbar=True, stretch="linear",kwargs_colorbar={'label': cbar_label})
+    elif key in ['excess', 'ts', 'flux']: skymap.plot(ax=ax, add_cbar=True, stretch="linear", cmap='magma',kwargs_colorbar={'label': cbar_label})
     elif 'significance' in key: 
         skymap.plot(ax=ax, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma',kwargs_colorbar={'label': cbar_label})
+        ax.contour(skymap.data[0], levels=[3,5], colors=['white', 'red'], alpha=0.5)
         maxsig = np.nanmax(skymap.data)
         minsig = np.nanmin(skymap.data)
         im = ax.images        
@@ -509,11 +531,60 @@ def plot_skymap_from_dict(skymaps, key, crop_width=0 * u.deg, ring_bkg_param=Non
     plt.tight_layout()
     plt.show()
 
-
 #-------------------------------------------------------------------------------------
 # Model validation
 #-------------------------------------------------------------------------------------
+
+def plot_residuals_histogram(maps:dict, exclude_regions = None):
+    exclusion_mask =  maps["significance_all"].geom.region_mask(exclude_regions, inside=False)
+    exclusion_mask_not_source =  maps["significance_all"].geom.region_mask(exclude_regions[-1], inside=False)
+    significance_all = maps["significance_all"].data[np.logical_and(np.isfinite(maps["significance_all"].data), 
+                                                            exclusion_mask_not_source.data)]
+    significance_off = maps["significance_off"].data[np.logical_and(np.isfinite(maps["significance_all"].data), 
+                                                            exclusion_mask.data)]
+    emin_map, emax_map = significance_all.geom.axes['energy'].bounds
     
+    fig, ax1 = plt.subplots(figsize=(4,4))
+    ax1.hist(
+        significance_all[significance_all != 0],
+        range=(-8,8),
+        density=True,
+        alpha=0.5,
+        color="red",
+        label="all bins",
+        bins=30,
+    )
+
+    ax1.hist(
+        significance_off[significance_off != 0],
+        range=(-8,8),
+        density=True,
+        alpha=0.5,
+        color="blue",
+        label="off bins",
+        bins=30,
+    )
+
+    # Now, fit the off distribution with a Gaussian
+    mu, std = norm_stats.fit(significance_off[significance_off != 0])
+    x = np.linspace(-8, 8, 30)
+    p = norm_stats.pdf(x, mu, std)
+    ax1.plot(x, p, lw=2, color="black")
+    p2 = norm_stats.pdf(x, 0, 1)
+    #ax.plot(x, p2, lw=2, color="green")
+    ax1.set_title(f"Background residuals map E= {emin_map:.1f} - {emax_map:.1f}")
+    ax1.text(-2.,0.001, f'mu = {mu:3.2f}\nstd={std:3.2f}',fontsize=14, fontweight='bold')
+    ax1.legend()
+    ax1.set_xlabel("Significance")
+    ax1.set_yscale("log")
+    ax1.set_ylim(1e-5, 1)
+    ax1.set_xlim(-5,6.)
+    #xmin, xmax = np.min(significance_off), np.max(significance_off)
+    #ax.set_xlim(xmin, xmax)
+    print("mu = ", mu," std= ",std )
+    plt.tight_layout()
+    plt.show()
+
 def get_value_at_threshold(data_to_bin,weights,threshold_percent,plot=False):
     # Filter NaN values
     data_to_bin_filtered = data_to_bin[~np.isnan(weights)]
@@ -541,7 +612,7 @@ def get_value_at_threshold(data_to_bin,weights,threshold_percent,plot=False):
         plt.show()
     return data_value_at_thr
 
-def compute_residuals(out, true, residuals='diff/true',res_lim_for_nan=0.9) -> np.array:
+def compute_residuals(out, true, residuals='diff/true',res_lim_for_nan=1.) -> np.array:
     res_arr = np.zeros_like(true)
     for iEbin in range(true.shape[0]):
         diff = out[iEbin,:,:] - true[iEbin,:,:]
@@ -550,12 +621,226 @@ def compute_residuals(out, true, residuals='diff/true',res_lim_for_nan=0.9) -> n
         diff[np.abs(res) >= res_lim_for_nan] = np.nan # Limit to mask bins with "almost zero" statistics for truth model and 0 output count
         # Caveat: this will also mask very large bias, but the pattern should be visibly different
 
-        if residuals == "diff/true": res = diff / true[iEbin,:,:]
+        if residuals == "diff": res = diff
+        elif residuals == "diff/true": res = diff / true[iEbin,:,:]
         elif residuals == "diff/sqrt(true)": res = diff / np.sqrt(true[iEbin,:,:])
+        elif residuals == "diff/sqrt(out)": res = diff / np.sqrt(out[iEbin,:,:])
 
         # res[true[iEbin,:,:] == 0] = np.nan
         res_arr[iEbin,:,:] += res
     return res_arr
+
+def get_nested_model_wilk_significance(fitted_null_model, fitted_alternative_model):
+    D = fitted_null_model.total_stat - fitted_alternative_model.total_stat
+    null_free_parameters = pd.Series(fitted_null_model.parameters.free_parameters.to_table()['name'])
+    alt_free_parameters = pd.Series(fitted_alternative_model.parameters.free_parameters.to_table()['name'])
+    is_nested = null_free_parameters.isin(alt_free_parameters).all()
+    if is_nested:
+        delta_dof = len(alt_free_parameters) - len(null_free_parameters)
+
+        if delta_dof == 1: return np.sqrt(D) if D > 0 else np.sqrt(-D)
+        else:
+            p_value = chi2.sf(D, delta_dof)
+            return np.sqrt(2) * (erfcinv(p_value) if p_value < 1e-4 else erfinv(1-p_value))
+    else: return 0
+
+#-------------------------------------------------------------------------------------
+# High level analysis
+#-------------------------------------------------------------------------------------
+
+def get_plot_kwargs_from_models_dict(models_dict):    
+    plot_kwargs = models_dict["plot_kwargs"].copy()
+    plot_kwargs["energy_bounds"] = plot_kwargs["energy_bounds"] * u.Unit(plot_kwargs["energy_bounds_unit"])
+    plot_kwargs.pop("energy_bounds_unit", None)
+    plot_kwargs["yunits"] = u.Unit(plot_kwargs["yunits"])
+    return plot_kwargs
+
+def plot_ref(ax, ref_models, ref_source_name, ref_model_name, plot_type = "spectral"):
+    ref_source_dict = ref_models[ref_source_name]["published"][ref_model_name]
+
+    ref_source_model_dict=ref_source_dict["models"].copy()
+    ref_source_model_dict["name"] = ref_model_name
+    ref_source_model = SkyModel.from_dict(ref_source_model_dict)
+    plot_kwargs = get_plot_kwargs_from_models_dict(ref_source_dict)
+
+    if plot_type == "spectral":
+        plot_kwargs.pop("color_sigma", None)
+        plot_kwargs.pop("ls_sigma", None)
+        ref_source_model.spectral_model.plot(ax=ax, **plot_kwargs)
+        plot_kwargs.pop("label", None)
+        ref_source_model.spectral_model.plot_error(ax=ax, alpha=0.1, facecolor=plot_kwargs["color"], **plot_kwargs)
+    elif plot_type=='spatial':
+        center = SkyCoord(ra=ref_source_model.spatial_model.lon_0.value * u.deg,dec=ref_source_model.spatial_model.lat_0.value * u.deg, frame="icrs")
+        sigma = ref_source_model.spatial_model.sigma.value
+        r = SphericalCircle(center, sigma * u.deg,
+                                edgecolor=plot_kwargs["color_sigma"], facecolor='none',
+                                lw = 2,
+                                ls = plot_kwargs["ls_sigma"],
+                                transform=ax.get_transform('icrs'), label=plot_kwargs["label"])
+        ax.add_patch(r)
+
+def plot_spectra_from_models_dict(ax, results, ref_models, ref_source_name, ref_models_to_plot, results_to_plot=['all'], bkg_methods_to_plot=['all'], fit_methods_to_plot=['all'], colors = ['blue', 'darkorange', 'purple', 'green']):
+
+    for ref_model_name in ref_models_to_plot:
+        plot_ref(ax, ref_models, ref_source_name, ref_model_name, plot_type = "spectral")
+    
+    bkg_methods = ['ring', 'FoV'] if bkg_methods_to_plot == ['all'] else bkg_methods_to_plot
+    fit_methods = ['stacked', 'joint'] if fit_methods_to_plot == ['all'] else fit_methods_to_plot
+    tested_models = list(results[bkg_methods[0]]['results'].keys()) if results_to_plot == ['all'] else results_to_plot
+
+    i=0
+    for bkg_method in bkg_methods:
+        for tested_model in tested_models:
+            for fit_method in fit_methods:
+                if (len(results[bkg_method]['results'][tested_model][fit_method]) == 0): continue
+                results_model = results[bkg_method]['results'][tested_model][fit_method]['models'].copy()
+                for model in results_model[:-1]:
+                    model_name = model.name
+                    # print(model_name)
+                    flux_points = results[bkg_method]['results'][tested_model][fit_method][model_name]["flux_points"].copy()
+
+                    plot_kwargs = {
+                        "energy_bounds": [flux_points.energy_min[flux_points.success.data.flatten()][0],flux_points.energy_max[flux_points.success.data.flatten()][-1]] * u.TeV,
+                        "sed_type": "e2dnde",
+                        "ls" : "-" if 'tail' in model_name else ":",
+                        "color": colors[i],
+                        "yunits": u.Unit("TeV cm-2 s-1"),
+                    }
+
+                    model.spectral_model.plot(ax=ax,**plot_kwargs.copy())
+                    # plot_kwargs.pop("label", None)
+
+                    model.spectral_model.plot_error(ax=ax, alpha=0.1, facecolor=colors[i], **plot_kwargs.copy())
+
+                    label = f"{model_name} ({bkg_method}, {fit_method})"
+                    flux_points.plot(ax=ax, sed_type="e2dnde", label=label, color=colors[i], marker='o' if 'tail' in model_name else "x", markersize=5 if 'tail' in model_name else 7)
+                i+=1
+
+def plot_spatial_model_from_dict(bkg_method, key, results, ref_models, ref_source_name, ref_models_to_plot, results_to_plot=['all'], bkg_methods_to_plot=['all'], fit_methods_to_plot=['all'], crop_width=0 * u.deg, estimator='excess', ring_bkg_param=None, figsize=(5,5),bbox_to_anchor=(1,1),fontsize=15, colors = ['blue', 'darkorange', 'purple', 'green']):
+    skymaps_args = {
+        'counts': {
+            'cbar_label': 'events',
+            'title': 'Counts map'
+        },
+        'background': {
+            'cbar_label': 'events',
+            'title': 'Background map'
+        },
+        'significance_all': {
+            'cbar_label': 'significance [$\sigma$]',
+            'title': 'Significance map'
+        },
+        'significance_off': {
+            'cbar_label': 'significance [$\sigma$]',
+            'title': 'Off significance map'
+        },
+        'excess': {
+            'cbar_label': 'events',
+            'title': 'Excess map'
+        },
+        'ts': {
+            'cbar_label': 'TS',
+            'title': 'TS map'
+        },
+        'flux': {
+            'cbar_label': 'flux [$s^{-1}cm^{-2}$]',
+            'title': f'Flux map ({bkg_method}, {estimator})\nwith 3$\sigma$ (white) and 5$\sigma$ (blue) contour'
+        }
+    }
+
+    skymaps_dict = results[bkg_method][f'skymaps_{estimator}']
+    skymap = skymaps_dict[key]
+    skymap_sig = skymaps_dict["significance_all"]
+    if crop_width != 0 * u.deg:
+        width = 0.5 * skymap.geom.width[0][0]
+        binsize = width / (0.5 * skymap.data.shape[-1])
+        n_crop_px = int(((width - crop_width)/binsize).value)
+        skymap = skymap.crop(n_crop_px)
+        skymap_sig = skymap_sig.crop(n_crop_px)
+    
+    cbar_label, title = (skymaps_args[key]["cbar_label"], skymaps_args[key]["title"])
+
+    fig,ax=plt.subplots(figsize=figsize,subplot_kw={"projection": skymap.geom.wcs})
+    if key in ['counts', 'background']: skymap.smooth(0.01 * u.deg).plot(ax=ax, add_cbar=True, stretch="linear",kwargs_colorbar={'label': cbar_label})
+    elif key in ['excess', 'ts', 'flux']: skymap.smooth(0.01 * u.deg).plot(ax=ax, add_cbar=True, stretch="linear", cmap='Greys_r',kwargs_colorbar={'label': cbar_label})
+    elif 'significance' in key: 
+        skymap.smooth(0.01 * u.deg).plot(ax=ax, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma',kwargs_colorbar={'label': cbar_label})
+        maxsig = np.nanmax(skymap.data)
+        minsig = np.nanmin(skymap.data)
+        im = ax.images        
+        cb = im[-1].colorbar 
+        cb.ax.axhline(maxsig, c='g')
+        cb.ax.text(1.1,maxsig - 0.07,' max', color = 'g')
+        cb.ax.axhline(minsig, c='g')
+        cb.ax.text(1.1,minsig - 0.07,' min', color = 'g')
+    
+    ax.contour(skymap_sig.data[0], levels=[3,5], colors=['white', 'mediumblue'], alpha=0.5)
+
+    for ref_model_name in ref_models_to_plot:
+        plot_ref(ax, ref_models, ref_source_name, ref_model_name, plot_type = "spatial")
+    
+    both_bkg_methods = bkg_methods_to_plot == ['all']
+    both_fit_methods = fit_methods_to_plot == ['all']
+
+    bkg_methods = ['ring', 'FoV'] if both_bkg_methods else bkg_methods_to_plot
+    fit_methods = ['stacked', 'joint'] if fit_methods_to_plot == ['all'] else fit_methods_to_plot
+    tested_models = list(results[bkg_methods[0]]['results'].keys()) if results_to_plot == ['all'] else results_to_plot
+
+    i=0
+
+    for bkg_method in bkg_methods:
+        for tested_model in tested_models:
+            for fit_method in fit_methods:
+                fitted_null_model = results[bkg_method]['results']['No source - No source'][fit_method]["fit_result"]
+                label_methods = " ("* (both_bkg_methods or both_fit_methods) + bkg_method * both_bkg_methods +","*(both_bkg_methods and both_fit_methods)+ fit_method * both_fit_methods +")"* (both_bkg_methods or both_fit_methods)
+
+                if (len(results[bkg_method]['results'][tested_model][fit_method]) == 0): continue
+                results_model = results[bkg_method]['results'][tested_model][fit_method]['models'].copy()
+                j=0
+                for model in results_model[:-1]:
+                    model_name = model.name
+                    center = SkyCoord(ra=model.spatial_model.lon_0.value * u.deg,dec=model.spatial_model.lat_0.value * u.deg, frame="icrs")
+                    label=f"{model_name}{label_methods}"
+                    
+                    if j==0:
+                        fitted_alternative_model = results[bkg_method]['results'][tested_model][fit_method]['fit_result']
+                        wilk_sig = get_nested_model_wilk_significance(fitted_null_model, fitted_alternative_model)
+                        label_wilk= ", $\sqrt{TS}$" + f"={wilk_sig:.2f}"
+                    
+                    if "Point" in model_name:
+                        r = SphericalCircle(center, 0.04 * u.deg,
+                                            edgecolor='black', facecolor=colors[i],
+                                            ls = "-" if j==0 else ":",
+                                            lw = 1,
+                                            transform=ax.get_transform('icrs'), label=label + label_wilk*(j==0))
+                        ax.add_patch(r)
+
+                    if "Gauss" in model_name:
+                        sigma = model.spatial_model.sigma.value
+                        if "1D" in model_name:
+                            label += f": $\sigma$={sigma:.2f}°"
+                        
+                            r = SphericalCircle(center, sigma * u.deg,
+                                                edgecolor=colors[i], facecolor='none',
+                                                ls = "-" if j==0 else ":",
+                                                lw = 3,
+                                                transform=ax.get_transform('icrs'), label=label + label_wilk*(j==0))
+                            ax.add_patch(r)
+                        else:
+                            sky_region = model.spatial_model.to_region(x_sigma=1.)
+                            pixel_region = sky_region.to_pixel(skymap.geom.wcs)
+                            label += f": $\sigma_eff$={sigma:.2f}°"
+                            pixel_region.plot(ax=ax,
+                                            color = colors[i],
+                                            lw=3,
+                                            ls = "-" if j==0 else ":",
+                                            label=label + label_wilk*(j==0))
+                    j+=1
+                i+=1
+    ax.set_title(label=title,fontsize=fontsize)
+    ax.legend(fontsize=fontsize)
+    plt.tight_layout()
+    plt.show()
 
 #-------------------------------------------------------------------------------------
 # Misc

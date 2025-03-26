@@ -1,9 +1,10 @@
 ---
 paths:
   path_data: ./gammapy-datasets/dev/hess-dl3-dr1/data # Path to dl3 files containing the full-enclosure IRFs
+  models: ./SimBMVtool/models.yaml
   gammapy_catalog: gammapy-datasets/dev/catalogs/gammacat/gammacat.fits.gz
-  output_dir: ./outputs
-  subdir: crab_hess
+  output_dir: ./outputs_dev
+  subdir: crab_hess_bkg_only
 data:
   run_list: [] # None, array of obs_ids
   obs_pattern: '*_dl3_*.fits.gz'
@@ -36,37 +37,58 @@ source:
   coordinates:
     ra: 83.63308
     dec: 22.0145
-  flux_to_0: True                             # Set to True for background only simulated data. If False, the source needs to be in Gammacat
+  flux_to_0: True                             # Set to True for background only simulated data. If False, the source needs to be in Gammacat or declared in custom_source
+  is_custom: False
+  custom_source:
+    name: crab disk
+    spectral:
+        type: ExpCutoffPowerLawSpectralModel
+        parameters: [{'name': 'index', 'value': 2.3900, 'error': 3.000e-02},
+                      {'name': 'amplitude', 'value': 3.7600e-11, 'unit': 'TeV-1 s-1 cm-2', 'error': 7.000e-13},
+                      {'name': 'lambda_', 'value': 6.9930e-02, 'unit': 'TeV-1', 'error': 1.027e-02},
+                      {'name': 'alpha', 'value': 1.0000, 'error': 0.0000},
+                      {'name': 'reference', 'value': 1.0, 'unit': 'TeV'}]
+    spatial:
+      type: DiskSpatialModel
+      parameters: [{'name': 'lon_0', 'value': 83.63308, 'unit': 'deg'},
+                      {'name': 'lat_0', 'value':  22.0145, 'unit': 'deg'},
+                      {'name': 'r_0', 'value': 0.2, 'unit': 'deg'},
+                      {'name': 'phi', 'value': 0, 'unit': 'deg'},
+                      {'name': 'edge_width', 'value': 0.01},
+                      {'name': 'e', 'value': 0},
+                      {'name': 'frame', 'value': icrs}]
   exclusion_region:
-    shape: n_circles                          # n_circles, ellipse, noexclusion
-    n_circles:
-      circle_1:       
+    shape: noexclusion                          # n_shapes, noexclusion.
+    regions:
+      circle_1:                              # Shapes can be circle, ellipse or ractangle, with SkyRegion parameters
         radius: 0.3
         ra: 83.63308
         dec: 22.0145
+        is_source: True                      # Region masks signal region. False if background source in FoV (like Zeta Tauri for Crab)
 background:
   irf:
     down_factor: 10
     offset_factor: 2
-  spectral_model:
-    model: PowerLawNormSpectralModel
-    factor: 2.4
-    scale: 1
-    norm: 10
-    reference: 1 TeV
-    unit: sr-1 s-1 TeV-1
-  spatial_model:
-    model: GaussianSpatialModel_LinearGradient
-    lon_0: 0
-    lat_0: 0
-    lon_grad: 0
-    lat_grad: 0
+  custom_source:
+    name: 1d-gauss-pl
+    spectral:
+        type: PowerLawNormSpectralModel
+        parameters: [{'name': 'norm', 'value': 10.0, 'unit': 'TeV-1 s-1 sr-1'},
+                    {'name': 'tilt', 'value': 3},
+                    {'name': 'reference', 'value': 1.0, 'unit': 'TeV'}]
+    spatial:
+        type: GaussianSpatialModel_LinearGradient
+        frame: AltAz
+        parameters: [{'name': 'lon_0', 'value': 0.0, 'unit': 'deg'},
+                        {'name': 'lat_0', 'value': 0.0, 'unit': 'deg'},
+                        {'name': 'lon_grad', 'value': 0.0, 'unit': 'deg-1'},
+                        {'name': 'lat_grad', 'value': 0.0, 'unit': 'deg-1'},
+                        {'name': 'sigma', 'value': 1.7, 'unit': 'deg'},
+                        {'name': 'e', 'value': 0.0},
+                        {'name': 'phi', 'value': 0.0, 'unit': 'deg'}]
+  spatial_model_gradient:
     lon_grad_variation: False
     lat_grad_variation: False
-    sigma: 1.7
-    phi: 0
-    e: 0
-    unit: "deg"
   maker:
     correlation_radius: 0.08    # [deg]
     correlate_off: True

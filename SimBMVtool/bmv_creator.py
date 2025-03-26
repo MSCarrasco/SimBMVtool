@@ -12,6 +12,7 @@ from astropy.time import Time
 import matplotlib.pyplot as plt
 from matplotlib.colors import CenteredNorm,SymLogNorm
 
+from tqdm import tqdm
 import yaml, shutil, glob, logging
 from copy import deepcopy
 import pandas as pd
@@ -29,9 +30,9 @@ from gammapy.datasets import MapDataset,MapDatasetEventSampler,Datasets,MapDatas
 from gammapy.irf import load_irf_dict_from_file, Background2D, Background3D, FoVAlignment
 from gammapy.makers import FoVBackgroundMaker,MapDatasetMaker, SafeMaskMaker, RingBackgroundMaker
 from gammapy.maps import MapAxis, WcsGeom, WcsNDMap, Map
-from regions import CircleAnnulusSkyRegion, CircleSkyRegion, EllipseSkyRegion
+from regions import CircleAnnulusSkyRegion, CircleSkyRegion, EllipseSkyRegion, Regions
 from gammapy.maps.region.geom import RegionGeom
-from gammapy.estimators import ExcessMapEstimator
+from gammapy.estimators import ExcessMapEstimator, FluxPointsEstimator
 from gammapy.datasets import Datasets, MapDataset, MapDatasetOnOff
 from astropy.visualization.wcsaxes import SphericalCircle
 
@@ -49,6 +50,7 @@ from gammapy.modeling.models import (
 from gammapy.catalog import SourceCatalogGammaCat, SourceCatalogObject
 
 from scipy.stats import norm as norm_stats
+from scipy.stats import normaltest, shapiro
 from gammapy.stats import CashCountsStatistic
 from gammapy.modeling import Parameter, Parameters
 from gammapy.utils.compat import COPY_IF_NEEDED
@@ -66,9 +68,11 @@ from gammapy.makers.utils import make_map_background_irf
 from toolbox import (get_value_at_threshold,
                      compute_residuals,
                      scale_value,
+                     get_regions_from_dict,
                      get_geom,
                      get_exclusion_mask_from_dataset_geom,
-                     get_skymaps_dict)
+                     get_skymaps_dict,
+                     plot_skymap_from_dict)
 
 from base_simbmvtool_creator import BaseSimBMVtoolCreator
 
@@ -82,9 +86,10 @@ class BMVCreator(BaseSimBMVtoolCreator):
         self.index_suffix = f"_with_bkg_{self.bkg_dim}d_{self.method}_{self.end_name[3:]}"
         self.acceptance_files_dir = f"{self.output_dir}/{self.subdir}/{self.method}/acceptances"
         self.plots_dir=f"{self.output_dir}/{self.subdir}/{self.method}/plots"
-        
+        self.data_dir=f"{self.output_dir}/{self.subdir}/{self.method}/data"
         Path(self.acceptance_files_dir).mkdir(parents=True, exist_ok=True)
         Path(self.plots_dir).mkdir(parents=True, exist_ok=True)
+        Path(self.data_dir).mkdir(parents=True, exist_ok=True)
         print("acceptance files: ",self.acceptance_files_dir)
 
     def init_exclusion_region(self, cfg_exclusion_region='stored_config', init_save_paths=False) -> None:
@@ -96,51 +101,71 @@ class BMVCreator(BaseSimBMVtoolCreator):
         elif cfg_exclusion_region == 'stored_config':
             self.cfg_source = self.config["source"]
             self.cfg_exclusion_region = self.cfg_source["exclusion_region"]
+            self.regions_dict = self.cfg_exclusion_region["regions"]
         
         if not cfg_exclusion_region == 'stored_parameters': self.region_shape = self.cfg_exclusion_region["shape"]
         self.source_region = []
+        self.exclude_regions_not_source = []
         
         if (self.region_shape=='noexclusion'):
             # Parts of the code don't work without an exlcusion region, so a dummy one is declared at the origin of the ICRS frame (and CircleSkyRegion object needs a non-zero value for the radius) 
-            self.source_region.append(CircleSkyRegion(center=SkyCoord(ra=0. * u.deg, dec=0. * u.deg, frame='icrs'),radius=1*u.deg))
+            self.source_region.append(CircleSkyRegion(center=SkyCoord(ra=0. * u.deg, dec=0. * u.deg, frame='icrs'),radius=5*u.deg))
+            self.exclu_rad = 0
+            self.exclusion_radius = 0*u.deg
+            self.exclude_regions=[self.source_region[0]]
         
-        elif (self.region_shape=='n_circles'):
+        elif (self.region_shape=='n_shapes'):
             if not cfg_exclusion_region == 'stored_parameters':
-                self.n_circles = len(self.cfg_exclusion_region["n_circles"])
-                self.n_circles_radec = []
-                self.n_circles_radius = []
+                self.exclude_regions = get_regions_from_dict(self.regions_dict)
             else:
-                self.n_circles = len(self.n_circles_radius)
+                self.exclude_regions = get_regions_from_dict(self.cfg_exclusion_region["regions"])
             
-            for i in range(self.n_circles):
+            self.n_regions = len(self.regions_dict)
+            
+            for iregion, region in enumerate(self.regions_dict):
+                if  self.regions_dict[region]["is_source"]:
+                    self.source_region.append(self.exclude_regions[iregion])
+                    if len(self.source_region) == 1:
+                        self.exclu_rad = self.regions_dict[region]["radius"] if region.split("_")[0] == 'circle' else self.regions_dict[region]["width"]
+                else: self.exclude_regions_not_source.append(self.exclude_regions[iregion])
+        else:
+            if (self.region_shape=='n_circles'):
                 if not cfg_exclusion_region == 'stored_parameters':
-                    cfg_circle = self.cfg_exclusion_region["n_circles"][f"circle_{i+1}"]
-                    self.n_circles_radec.append([cfg_circle["ra"],cfg_circle["dec"]])
-                    self.n_circles_radius.append(cfg_circle["radius"])
+                    self.n_circles = len(self.cfg_exclusion_region["regions"])
+                    self.n_circles_radec = []
+                    self.n_circles_radius = []
+                else:
+                    self.n_circles = len(self.n_circles_radius)
+                
+                for i in range(self.n_circles):
+                    if not cfg_exclusion_region == 'stored_parameters':
+                        cfg_circle = self.cfg_exclusion_region["n_circles"][f"circle_{i+1}"]
+                        self.n_circles_radec.append([cfg_circle["ra"],cfg_circle["dec"]])
+                        self.n_circles_radius.append(cfg_circle["radius"])
 
-                circle_pos = SkyCoord(ra=self.n_circles_radec[i][0] * u.deg, dec=self.n_circles_radec[i][1] * u.deg, frame='icrs')
-                circle_rad = self.n_circles_radius[i] * u.deg
-                self.source_region.append(CircleSkyRegion(center=circle_pos, radius=circle_rad))
-                if i == 0:
-                    self.exclusion_radius=circle_rad
-                    self.exclu_rad = circle_rad.to_value(u.deg)
+                    circle_pos = SkyCoord(ra=self.n_circles_radec[i][0] * u.deg, dec=self.n_circles_radec[i][1] * u.deg, frame='icrs')
+                    circle_rad = self.n_circles_radius[i] * u.deg
+                    self.source_region.append(CircleSkyRegion(center=circle_pos, radius=circle_rad))
+                    if i == 0:
+                        self.exclusion_radius=circle_rad
+                        self.exclu_rad = circle_rad.to_value(u.deg)
+            
+            elif (self.region_shape=='ellipse'):
+                if not cfg_exclusion_region == 'stored_parameters': 
+                    self.width = self.cfg_exclusion_region["ellipse"]["width"] * u.deg
+                    self.height = self.cfg_exclusion_region["ellipse"]["height"] * u.deg
+                    self.angle = self.cfg_exclusion_region["ellipse"]["angle"] * u.deg
+                self.source_region = [EllipseSkyRegion(center=self.source_pos, width=self.width, height=self.height, angle=self.angle)]
+            
+            self.exclude_regions=[]
+            for region in self.source_region: self.exclude_regions.append(region)
         
-        elif (self.region_shape=='ellipse'):
-            if not cfg_exclusion_region == 'stored_parameters': 
-                self.width = self.cfg_exclusion_region["ellipse"]["width"] * u.deg
-                self.height = self.cfg_exclusion_region["ellipse"]["height"] * u.deg
-                self.angle = self.cfg_exclusion_region["ellipse"]["angle"] * u.deg
-            self.source_region = [EllipseSkyRegion(center=self.source_pos, width=self.width, height=self.height, angle=self.angle)]
-        
-        self.exclude_regions=[]
-        for region in self.source_region: self.exclude_regions.append(region)
-        
-        self.single_region=True     # Set it to False to mask additional regions in the FoV. The example here adds a region on Zeta Tauri position. So far you need to declare it manually in the init function
-        if not self.single_region:
-            # TO-DO: catalog of classic regions to mask. Here it is an example for masking zeta tauri on crab observations
-            zeta_region = CircleSkyRegion(center=SkyCoord(ra=84.4125*u.deg, dec=21.1425*u.deg), radius=self.exclusion_radius)
-            self.exclude_regions.append(zeta_region)
-        
+        self.exclude_regions_bkg_irf = self.exclude_regions.copy()
+        safe_circle = CircleAnnulusSkyRegion(center=self.source_pos,
+                                    inner_radius=self.size_fov_acc,
+                                    outer_radius=20 * u.deg)
+        self.exclude_regions.append(safe_circle)
+        self.exclude_regions_not_source.append(safe_circle)
         self.source_info = [self.source_name, self.source_pos, self.source_region]
         if init_save_paths: self.init_save_paths()
     
@@ -204,6 +229,11 @@ class BMVCreator(BaseSimBMVtoolCreator):
         self.output_dir = self.cfg_paths["output_dir"]
         self.subdir = self.cfg_paths["subdir"]
         if self.simulator or ((not self.real_data) & (not self.external_data)): self.simulated_obs_dir = f"{self.output_dir}/{self.subdir}/simulated_data"
+
+        self.path_models=self.cfg_paths["models"]
+        if self.path_models is not None:
+            with open(self.path_models, 'r') as file:
+                self.models_dict = yaml.safe_load(file)
 
         # Data
         self.run_list = np.array(self.cfg_data["run_list"])
@@ -462,14 +492,14 @@ class BMVCreator(BaseSimBMVtoolCreator):
         if self.bkg_dim==2:
             acceptance_model_creator = RadialAcceptanceMapCreator(self.energy_axis_acceptance,
                                                                 self.offset_axis_acceptance,
-                                                                exclude_regions=self.exclude_regions,
+                                                                exclude_regions=self.exclude_regions_bkg_irf,
                                                                 initial_cos_zenith_binning=self.initial_cos_zenith_binning,
                                                                 cos_zenith_binning_method=self.cos_zenith_binning_method,
                                                                 cos_zenith_binning_parameter_value=self.cos_zenith_binning_parameter_value)
         elif self.bkg_dim==3:
             acceptance_model_creator = Grid3DAcceptanceMapCreator(self.energy_axis_acceptance,
                                                             self.offset_axis_acceptance,
-                                                            exclude_regions=self.exclude_regions,
+                                                            exclude_regions=self.exclude_regions_bkg_irf,
                                                             initial_cos_zenith_binning=self.initial_cos_zenith_binning,
                                                             cos_zenith_binning_method=self.cos_zenith_binning_method,
                                                             cos_zenith_binning_parameter_value=self.cos_zenith_binning_parameter_value,
@@ -510,94 +540,118 @@ class BMVCreator(BaseSimBMVtoolCreator):
                 hdu_acceptance.writeto(f'{self.acceptance_files_dir}/acceptance_obs-{obs_id}.fits', overwrite=True)
         self.load_output_background_irfs()
     
-    def get_unstacked_dataset(self, axis_info='irf'):
-        source,source_pos,source_region = self.source_info
-        if axis_info=='irf': emin,emax,offset_max,nbin_offset = self.axis_info_irf
-        elif axis_info=='map': emin,emax,offset_max,nbin_offset = self.axis_info_map
-        else: emin,emax,offset_max,nbin_offset = axis_info
+    def load_dataset(self, file_name:str, stacked=True):
+        path = Path(file_name)
+        if path.is_file():
+            if stacked:
+                self.stacked_dataset = MapDataset.read(path)
+                if self.stacked_dataset is None: self.stacked_dataset = MapDatasetOnOff.read(path)
+            else:
+                self.unstacked_datasets = Datasets.read(path)
+        elif len(file_name.split("/")) == 1:
+            path = f"{self.data_dir}/datasets{'' if stacked else '/unstacked'}/{file_name}.fits"
+            if stacked:
+                self.stacked_dataset = MapDataset.read(path)
+                if self.stacked_dataset is None: self.stacked_dataset = MapDatasetOnOff.read(path)
+            else:
+                self.unstacked_datasets = Datasets.read(path)
+        else: ValueError(f"Invalid file_name: not a path nor a name")
 
-        exclusion = self.region_shape != 'noexclusion'
+    def save_dataset(self, file_name:str, dataset=None, stacked=True):
+        '''Write stacked dataset as a fits file'''
+        if dataset is None:
+            if stacked: dataset = self.stacked_dataset
+            else: dataset = self.unstacked_datasets
+        if len(file_name.split("/")) == 1:
+            dataset_dir = f"{self.data_dir}/datasets{'' if stacked else '/unstacked'}"
+            Path(dataset_dir).mkdir(parents=True, exist_ok=True)
+            dataset.write(f"{dataset_dir}/{file_name}.fits", overwrite=True)
+        else:
+            Path(file_name).parent.mkdir(parents=True, exist_ok=True)
+            dataset.write(file_name, overwrite=True)
+
+    def get_unstacked_datasets(self, axis_info_dataset=None, npix_factor=1, unstacked_datasets_savename = ""):
+        source,source_pos,source_region = self.source_info
+        if axis_info_dataset is not None: self.axis_info_dataset = axis_info_dataset
+        emin, emax, nbin_E_per_decade, offset_max, width = self.axis_info_dataset
 
         # Declare the non-spatial axes 
         unit="TeV"
-        nbin_energy = 10
+        nbin_E = round((np.log10(emax.to_value(u.TeV))-np.log10(emin.to_value(u.TeV)))*nbin_E_per_decade)
 
-        energy_axis = MapAxis.from_energy_bounds(
-            emin, emax, nbin=nbin_energy, per_decade=True, unit=unit, name="energy"
-        )
-
-        # Reduced IRFs are defined in true energy (i.e. not measured energy). 
-        # The bounds need to take into account the energy dispersion. 
-        edisp_frac = 0.3
-        emin_true,emax_true = ((1-edisp_frac)*emin , (1+edisp_frac)*emax)
-        nbin_energy_true = 20
-
-        energy_axis_true = MapAxis.from_energy_bounds(
-            emin_true, emax_true, nbin=nbin_energy_true, per_decade=True, unit=unit, name="energy_true"
+        energy_axis = MapAxis.from_energy_edges(
+            np.geomspace(emin.to_value(u.TeV), emax.to_value(u.TeV), nbin_E+1)*u.TeV,
+            name="energy", interp="log"
         )
         
-        nbins_map = 2*nbin_offset
-        binsize = offset_max / (nbins_map / 2)
+        binsz = 0.02
+        npix = (int(width[0]/binsz), int(width[1]/binsz))
 
         # Create the geometry with the additional axes
         geom = WcsGeom.create(
             skydir=(source_pos.ra.degree,source_pos.dec.degree),
-            binsz=binsize, 
-            npix=(nbins_map, nbins_map),
+            binsz=binsz, 
+            npix=npix,
             frame="icrs",
             proj="CAR",
             axes=[energy_axis],
         )
 
-        # Get the energy-integrated image
-        geom_image = geom.to_image().to_cube([energy_axis.squash()])
-
-        base_map_dataset = MapDataset.create(geom=geom_image)
+        base_map_dataset = MapDataset.create(geom=geom)
         unstacked_datasets = Datasets()
 
-        maker = MapDatasetMaker(selection=["counts", "background"])
+        is_pointlike = self.obs_collection[0].aeff.data.shape[1] == 1
+        maps = ["counts", "background"]
+        if is_pointlike: maker = MapDatasetMaker(selection=maps)
+        else:
+            if self.obs_collection[0].psf is not None: maps.append("psf")
+            if self.obs_collection[0].edisp is not None: maps.append("edisp")
+            maps.append("exposure")
+
+            maker = MapDatasetMaker(selection=maps)
         maker_safe_mask = SafeMaskMaker(methods=["offset-max"], offset_max=offset_max)
         
         for obs in self.obs_collection:
             dataset_map = maker.run(base_map_dataset.copy(), obs)
             dataset_map = maker_safe_mask.run(dataset_map, obs)
             unstacked_datasets.append(dataset_map)
+        
+
+        if unstacked_datasets_savename != "": self.save_dataset(unstacked_datasets_savename, self.unstacked_datasets)
         return unstacked_datasets
     
-    def get_stacked_dataset(self, bkg_method=None, axis_info='irf'):
+    def get_stacked_dataset(self, bkg_method=None, axis_info='irf', npix_factor=1, binsz=0.02):
         source,source_pos,source_region = self.source_info
-        if axis_info=='irf': emin,emax,offset_max,nbin_offset = self.axis_info_irf
-        elif axis_info=='map': emin,emax,offset_max,nbin_offset = self.axis_info_map
-        else: emin,emax,offset_max,nbin_offset = axis_info
-
-        exclusion = self.region_shape != 'noexclusion'
+        if axis_info=='irf': emin,emax,nbin_E_per_decade,offset_max,width = self.axis_info_irf
+        elif axis_info=='map': emin,emax,nbin_E_per_decade,offset_max,width = self.axis_info_map
+        else: emin,emax,nbin_E_per_decade,offset_max,width = axis_info
 
         # Declare the non-spatial axes 
-        unit="TeV"
-        nbin_energy = 10
+        nbin_E = round((np.log10(emax.to_value(u.TeV))-np.log10(emin.to_value(u.TeV)))*nbin_E_per_decade)
 
-        energy_axis = MapAxis.from_energy_bounds(
-            emin, emax, nbin=nbin_energy, per_decade=True, unit=unit, name="energy"
+        energy_axis = MapAxis.from_energy_edges(
+            np.geomspace(emin.to_value(u.TeV), emax.to_value(u.TeV), nbin_E+1)*u.TeV,
+            name="energy", interp="log"
         )
 
         # Reduced IRFs are defined in true energy (i.e. not measured energy). 
         # The bounds need to take into account the energy dispersion. 
         edisp_frac = 0.3
         emin_true,emax_true = ((1-edisp_frac)*emin , (1+edisp_frac)*emax)
-        nbin_energy_true = 20
+        nbin_energy_true = 5
 
         energy_axis_true = MapAxis.from_energy_bounds(
-            emin_true, emax_true, nbin=nbin_energy_true, per_decade=True, unit=unit, name="energy_true"
+            emin_true, emax_true, nbin=nbin_energy_true, per_decade=True, unit=energy_axis.unit, name="energy_true"
         )
         
-        nbins_map = 2*nbin_offset
-        binsize = offset_max / (nbins_map / 2)
+        binsz = 0.02
+        npix = (int(width[0]/binsz), int(width[1]/binsz))
 
         # Create the geometry with the additional axes
         geom = WcsGeom.create(
             skydir=(source_pos.ra.degree,source_pos.dec.degree),
-            binsz=binsize, 
-            npix=(nbins_map, nbins_map),
+            binsz=binsz, 
+            npix=npix,
             frame="icrs",
             proj="CAR",
             axes=[energy_axis],
@@ -609,7 +663,7 @@ class BMVCreator(BaseSimBMVtoolCreator):
         base_map_dataset = MapDataset.create(geom=geom_image)
         unstacked_datasets = Datasets()
 
-        maker = MapDatasetMaker(selection=["counts", "background"])
+        maker = MapDatasetMaker(selection=["counts", "background", 'psf', 'edisp', "exposure"])
         maker_safe_mask = SafeMaskMaker(methods=["offset-max"], offset_max=offset_max)
         
         for obs in self.obs_collection:
@@ -621,7 +675,7 @@ class BMVCreator(BaseSimBMVtoolCreator):
         unstacked_datasets_local = unstacked_datasets.copy()
 
         ## Make the exclusion mask
-        if exclusion: exclusion_mask = geom_image.region_mask(self.exclude_regions, inside=False)
+        if self.region_shape!='noexclusion': exclusion_mask = geom_image.region_mask(self.exclude_regions, inside=False)
         else: exclusion_mask=None
         
         ## Make the MapDatasetOnOff
@@ -651,6 +705,12 @@ class BMVCreator(BaseSimBMVtoolCreator):
                 if bkg_method == 'FoV':  
                     dataset_loc.counts.data[~dataset_loc.mask_safe] = 0
                     dataset_loc = FoV_background_maker.run(dataset_loc)
+                    if self.fov_bkg_param == 'fit':
+                        fit_result = dataset_loc.models.to_parameters_table()
+                        norm_fit = fit_result[fit_result['name']=='norm']['value'][0]
+                        if norm_fit > 1.5 or norm_fit < 0.5:
+                            print(f"Fit for this dataset {dataset_loc.name} exceeds recommended limits. The norm of the fit is {norm_fit}.")
+                        
                 stacked_on_off.append(dataset_loc)
         
         if bkg_method == 'ring': return stacked_on_off
@@ -662,9 +722,12 @@ class BMVCreator(BaseSimBMVtoolCreator):
         fov_centers = bkg_irf.axes['fov_lon'].center.value.round(1)
         offset_edges = fov_edges[fov_edges >= 0]
         offset_centers = fov_centers[fov_centers >= 0]
-
-        radius_edges = self.radius_edges
-        radius_centers = self.radius_centers
+        radius_edges = np.linspace(0,self.size_fov_acc.value,self.nbin_offset_acc+1)
+        radius_centers = radius_edges[:-1]+0.5*(radius_edges[1:]-radius_edges[:-1])
+        self.radius_edges = radius_edges
+        self.radius_centers = radius_centers
+        # radius_edges = bmv.radius_edges
+        # radius_centers = bmv.radius_centers
 
         dfcoord = pd.DataFrame(index=pd.Index(fov_centers,name='fov_lon'),columns=pd.Index(fov_centers,name='fov_lat'))
         for (lon,lat) in product(dfcoord.index,dfcoord.columns): dfcoord.loc[lon,lat] = np.sqrt(lon**2 + lat**2)
@@ -682,6 +745,10 @@ class BMVCreator(BaseSimBMVtoolCreator):
                 values = dfdata[(dfcoord >= r_low) & (dfcoord < r_high)].values
                 dfvalues = pd.Series(values[~np.isnan(values)]).describe().to_frame().rename(columns={0:r_mid.round(1)})
                 dfvalues.loc['sum'] = np.nansum(values)
+                if len(values[~np.isnan(values)]) >= 20: TS, pval = normaltest(values[~np.isnan(values)])
+                else: TS, pval = shapiro(values[~np.isnan(values)])
+                dfvalues.loc['TS'] = TS
+                dfvalues.loc['pvalue'] = pval
                 if r_mid == radius_centers[0]: dfprofile_rad = dfvalues.copy()
                 else: dfprofile_rad = dfprofile_rad.join(dfvalues.copy())
             dfprofile_rad = pd.concat([dfprofile_rad], axis=0, keys=['fov_offset'])
@@ -705,6 +772,10 @@ class BMVCreator(BaseSimBMVtoolCreator):
             values = dfdata_all[(dfcoord >= r_low) & (dfcoord < r_high)].values
             dfvalues = pd.Series(values[~np.isnan(values)]).describe().to_frame().rename(columns={0:r_mid.round(1)})
             dfvalues.loc['sum'] = np.nansum(values)
+            if len(values[~np.isnan(values)]) >= 20: normal_stat = normaltest(values[~np.isnan(values)])
+            else: normal_stat = shapiro(values[~np.isnan(values)])
+            dfvalues.loc['TS'] = normal_stat.statistic
+            dfvalues.loc['pvalue'] = normal_stat.pvalue
             if r_mid == radius_centers[0]: dfprofile_rad = dfvalues.copy()
             else: dfprofile_rad = dfprofile_rad.join(dfvalues.copy())
         
@@ -713,8 +784,69 @@ class BMVCreator(BaseSimBMVtoolCreator):
         dfprofile_Ebin = pd.concat([dfprofile_Ebin, dfprofile_rad], keys=['lon_lat','offset'],join='outer',axis=1)
         dfprofile_Ebin = pd.concat([dfprofile_Ebin], axis=1, keys=[-1.0])
         dfprofile=pd.concat([dfprofile,dfprofile_Ebin],axis=1)
-        return dfprofile.sort_index()
+        self.dfprofile = dfprofile.sort_index()
+        return self.dfprofile
     
+    def plot_offset_residuals_pvalue(self, dfprofile=None):
+        if dfprofile is None: dfprofile = self.dfprofile
+        if self.true_collection: bkg_true_irf = deepcopy(self.bkg_true_down_irf_collection[1])
+        else: bkg_true_irf = deepcopy(self.bkg_true_down_irf)
+        fov_edges = bkg_true_irf.axes['fov_lon'].edges.value
+        fov_centers = bkg_true_irf.axes['fov_lon'].center.value
+        weights_Ebinall = np.sum(bkg_true_irf.data, axis=0)[np.newaxis, :, :].flatten()
+
+        E_centers = self.Ebin_mid
+        offset_edges = fov_edges[fov_edges >= 0]
+        offset_centers = fov_centers[fov_centers >= 0]
+        # radius_centers = simbmv.radius_centers
+        # radius_edges = simbmv.radius_edges
+        radius_edges = np.linspace(0,self.size_fov_acc.value,self.nbin_offset_acc+1)
+        radius_centers = radius_edges[:-1]+0.5*(radius_edges[1:]-radius_edges[:-1])
+
+        # Flatten and filter NaNs
+        x_centers = fov_centers
+        y_centers = fov_centers
+        X_, Y_ = np.meshgrid(x_centers, y_centers)
+        r_center = np.sqrt(X_**2 + Y_**2).flatten()
+        r_threshold = 99.8
+        r_3sig = get_value_at_threshold(r_center, weights_Ebinall, r_threshold, plot=False)
+
+        colors = plt.cm.tab10(np.linspace(0, 1, 10))
+        lw=1
+        ls_true,ls_out,ls_ratio = ("-","-","-")
+        m_lat,m_lon = ("o","o")
+
+        bias=True
+        stat='pvalue'
+        suptitle='FoV offset profile'
+        title='Offset'
+        xlabel="FoV offset bin center [°]"
+        ylabel=f'Bias {stat.capitalize()} [%]'
+        xlim = [0, fov_edges[-1]+ np.diff(radius_centers)[-1]]
+        ylim = [1e-4,2]
+        if bias: suptitle += ': bias p-value ($\sqrt{diff/true}$)' 
+
+        fig, ax = plt.subplots(figsize=(12,4))
+
+        for iEbin,Ebin in enumerate(np.concatenate(([-1], E_centers))):
+            if (Ebin != -1): label=self.Ebin_labels[iEbin-1]
+            else: label=f"All"
+            
+            y=dfprofile.xs((Ebin), axis=1).xs(('offset'),axis=1).loc[('fov_offset', stat)]
+            if stat != 'pvalue': y*=100
+            plot_condition = y < 100
+            sns.lineplot(x=radius_centers[plot_condition], y=y[plot_condition], ax=ax, label=label, lw=lw, ls=ls_true)
+                                    
+            ax.set(xlim=xlim, ylim=ylim,title=title,xlabel=xlabel,ylabel=ylabel, yscale='log')
+            ax.hlines([0.05],xlim[0],xlim[1],color='k')
+            ax.grid(True, alpha=0.2)
+
+        ax.legend(title='Energy bin',loc='lower left')
+        fig.suptitle(suptitle)
+        fig.tight_layout()
+
+        plt.show()
+
     def plot_profile(self, irf='both', i_irf=0, profile='both', stat='sum', bias=False, ratio_lim = [0.95,1.05], all_Ebins=False, fig_save_path=''):
         if not self.external_data:
             if self.true_collection: bkg_true_irf = deepcopy(self.bkg_true_down_irf_collection[i_irf])
@@ -777,11 +909,11 @@ class BMVCreator(BaseSimBMVtoolCreator):
                 if self.external_data or bias: fig, (ax_lon,ax_lat) = plt.subplots(1,2,figsize=(12,(2.5/4)*6))
                 else: fig, ((ax_lon,ax_lat),(ax_lon_ratio,ax_lat_ratio)) = plt.subplots(2,2,figsize=(12,6), gridspec_kw={'height_ratios': [2.5, 1.5]})
             if ((irf=='true') or (irf=='both')) and not bias: fig_true, (ax_lon_true,ax_lat_true) = plt.subplots(1,2,figsize=(12,(2.5/4)*6))
-            for iEbin,Ebin in enumerate(np.concatenate((E_centers,[-1]))):
+            for iEbin,Ebin in enumerate(np.concatenate(([-1], E_centers))):
                 if not all_Ebins and Ebin != -1: continue
                 else:
-                    if (Ebin != -1): label=self.Ebin_labels[iEbin]
-                    else: label=f"{self.e_min.value:.1f}-{self.e_max.value:.1f} {self.energy_axis_acceptance.unit}"
+                    if (Ebin != -1): label=self.Ebin_labels[iEbin-1]
+                    else: label=f"All"
 
                     if not self.external_data: fov_is_in_3sig = np.abs(profile_true.xs((Ebin), axis=1).xs(('lon_lat'),axis=1).loc[('fov_lon','sum')].index) < r_3sig
                     else: fov_is_in_3sig = np.abs(profile_out.xs((Ebin), axis=1).xs(('lon_lat'),axis=1).loc[('fov_lon','sum')].index) < r_3sig
@@ -840,7 +972,7 @@ class BMVCreator(BaseSimBMVtoolCreator):
             fig.tight_layout()
 
             plt.show()
-            if fig_save_path != '': fig.savefig(fig_save_path[:-4]+f"_coordinate_Ebin_{'all' if (Ebin==-1) else iEbin}.png", dpi=300, transparent=False, bbox_inches='tight')
+            if fig_save_path != '': fig.savefig(fig_save_path[:-4]+f"_coordinate_Ebin_{'all' if (Ebin==-1) else iEbin-1}.png", dpi=300, transparent=False, bbox_inches='tight')
 
         if (profile=='offset') or (profile=='both'):
             suptitle='FoV offset profile'
@@ -852,11 +984,11 @@ class BMVCreator(BaseSimBMVtoolCreator):
                 if self.external_data or bias: fig, ax = plt.subplots(figsize=(12,(2.5/4)*6))
                 else: fig, (ax,ax_ratio) = plt.subplots(2,1,figsize=(12,6), gridspec_kw={'height_ratios': [2.5, 1.5]})
             if ((irf=='true') or (irf=='both')) and not bias: fig_true, ax_true = plt.subplots(figsize=(12,(2.5/4)*6))
-            for iEbin,Ebin in enumerate(np.concatenate((E_centers,[-1]))):
+            for iEbin,Ebin in enumerate(np.concatenate(([-1], E_centers))):
                 if not all_Ebins and Ebin != -1: continue
                 else:
-                    if (Ebin != -1): label=self.Ebin_labels[iEbin]
-                    else: label=f"{self.e_min.value:.1f}-{self.e_max.value:.1f} {self.energy_axis_acceptance.unit}"
+                    if (Ebin != -1): label=self.Ebin_labels[iEbin-1]
+                    else: label=f"All"
 
                     offset_is_in_3sig = radius_edges[:-1] < r_3sig
                     
@@ -905,17 +1037,15 @@ class BMVCreator(BaseSimBMVtoolCreator):
             fig.tight_layout()
 
             plt.show()
-            if fig_save_path != '': fig.savefig(fig_save_path[:-4]+f"_offset_Ebin_{'all' if (Ebin==-1) else iEbin}.png", dpi=300, transparent=False, bbox_inches='tight')    
+            if fig_save_path != '': fig.savefig(fig_save_path[:-4]+f"_offset_Ebin_{'all' if (Ebin==-1) else iEbin-1}.png", dpi=300, transparent=False, bbox_inches='tight')    
 
-    def plot_model(self, data='acceptance', irf='true', residuals='none', profile='none', downsampled=True, i_irf=0, zenith_binned=False, title='', fig_save_path='', plot_hist=False) -> None:
+    def plot_model(self, data='acceptance', irf='true', residuals='none', profile='none', downsampled=True, i_irf=0, zenith_binned=False,res_lim_for_nan = 1., title='', fig_save_path='', plot_hist=False) -> None:
         '''
         data types = ['acceptance', 'bkg_map']
         irf types = ['true', 'output', 'both']
         residuals types = ['none',' diff/true', 'diff/sqrt(true)']
         profile types = ['none','radial','lon_lat','all']
         '''
-        res_lim_for_nan = 0.9
-
         fov_max = self.size_fov_acc.to_value(u.deg)
         fov_lim = [-fov_max,fov_max]
         fov_bin_edges = np.linspace(-fov_max,fov_max,7)
@@ -1040,24 +1170,40 @@ class BMVCreator(BaseSimBMVtoolCreator):
             if fig_save_path != '': fig.savefig(fig_save_path, dpi=300, transparent=False, bbox_inches='tight')
             if plot_residuals_data: 
                 if plot_hist:
-                    fig_hist, ax_hist = plt.subplots(figsize=(4,3))
+                    fig_hist, ax_hist = plt.subplots(figsize=(8,5))
                     res_arr_flat = np.array(self.res_arr).flatten()
                     res_arr_flat = res_arr_flat[~np.isnan(res_arr_flat)]
+                    if len(res_arr_flat) >= 20: normal_stat = normaltest(res_arr_flat)
+                    else: normal_stat = shapiro(res_arr_flat)
                     res_arr_flat_absmax = np.max(np.abs(res_arr_flat))
-                    sns.histplot(res_arr_flat, bins=np.linspace(-res_arr_flat_absmax,res_arr_flat_absmax,20), ax=ax_hist, element='step', fill=False, stat='density', color='k',line_kws={'color':'k'})
+                    sns.histplot(res_arr_flat, bins=np.linspace(-res_arr_flat_absmax,res_arr_flat_absmax,15), label=f"All ({normal_stat.pvalue:.2e})", ax=ax_hist, element='step', fill=False, multiple='layer')
+                    for iEbin in range(n):
+                        res_arr_flat = np.array(self.res_arr[iEbin,:,:]).flatten()
+                        res_arr_flat = res_arr_flat[~np.isnan(res_arr_flat)]
+                        if len(res_arr_flat) >= 20: normal_stat = normaltest(res_arr_flat)
+                        else: normal_stat = shapiro(res_arr_flat)
+                        res_arr_flat_absmax = np.max(np.abs(res_arr_flat))
+                        sns.histplot(res_arr_flat, bins=np.linspace(-res_arr_flat_absmax,res_arr_flat_absmax,15), label=self.Ebin_labels[iEbin][:-3]+f"({normal_stat.pvalue:.2e})", ax=ax_hist, element='step', fill=False, multiple='layer')
                     ax_hist.set(title=f'{title} distribution', xlabel=res_label, yscale='log')
-                    # Define the text content and position it on the right
-                    textstr = '\n'.join((
-                        r'$\mu=%.2f$' % (np.nanmean(res_arr_flat), ),
-                        r'$\mathrm{median}=%.2f$' % (np.nanmedian(res_arr_flat), ),
-                        r'$\sigma=%.2f$' % (np.nanstd(res_arr_flat), ),
-                        f'sum= {np.sum(res_arr_flat):.2f}'
-                    ))
+                    ax_hist.legend(title='E bin (p-value)', bbox_to_anchor=(1,1))
+                    # fig_hist, ax_hist = plt.subplots(figsize=(4,3))
+                    # res_arr_flat = np.array(self.res_arr).flatten()
+                    # res_arr_flat = res_arr_flat[~np.isnan(res_arr_flat)]
+                    # res_arr_flat_absmax = np.max(np.abs(res_arr_flat))
+                    # sns.histplot(res_arr_flat, bins=np.linspace(-res_arr_flat_absmax,res_arr_flat_absmax,20), ax=ax_hist, element='step', fill=False, stat='density', color='k',line_kws={'color':'k'})
+                    # ax_hist.set(title=f'{title} distribution', xlabel=res_label, yscale='log')
+                    # # Define the text content and position it on the right
+                    # textstr = '\n'.join((
+                    #     r'$\mu=%.2f$' % (np.nanmean(res_arr_flat), ),
+                    #     r'$\mathrm{median}=%.2f$' % (np.nanmedian(res_arr_flat), ),
+                    #     r'$\sigma=%.2f$' % (np.nanstd(res_arr_flat), ),
+                    #     f'sum= {np.sum(res_arr_flat):.2f}'
+                    # ))
 
-                    # Add the text box on the right of the plot
-                    props = dict(boxstyle='round', facecolor='w', alpha=0.5)
-                    ax_hist.text(1.05, 0.8, textstr, transform=ax_hist.transAxes,
-                                fontsize=10, verticalalignment='center', bbox=props)
+                    # # Add the text box on the right of the plot
+                    # props = dict(boxstyle='round', facecolor='w', alpha=0.5)
+                    # ax_hist.text(1.05, 0.8, textstr, transform=ax_hist.transAxes,
+                    #             fontsize=10, verticalalignment='center', bbox=props)
                     plt.show()
                     if fig_save_path != '': fig.savefig(fig_save_path[:-4]+'_distrib.png', dpi=300, transparent=False, bbox_inches='tight')
         else: print("No data to plot")
@@ -1079,7 +1225,7 @@ class BMVCreator(BaseSimBMVtoolCreator):
                 else:  fig_save_path_zd_bin=f"{fig_save_path[:-4]}_{zd_bin_center:.0f}.png"
                 self.plot_model(data=data, irf=irf, residuals=residuals, profile=profile, downsampled=True, i_irf=cos_center, zenith_binned=True, title=title, fig_save_path=fig_save_path_zd_bin, plot_hist=False)
     
-    def plot_zenith_binned_data(self, data='livetime', per_wobble=True):
+    def plot_zenith_binned_data(self, data='livetime', per_wobble=True, figsize=(5,5), xlim=(0,1)):
         if self.cos_zenith_binning_method == "livetime": print(f"observation per bin: ", 
                                                                 list(np.histogram(self.cos_zenith_observations, bins=np.flip(self.cos_zenith_bin_edges))[0]))
         wobble_observations = self.dfobs_table.WOBBLE.to_numpy()
@@ -1097,7 +1243,7 @@ class BMVCreator(BaseSimBMVtoolCreator):
             print(f"{wobble} observation per bin: {np.histogram(self.cos_zenith_observations, bins=np.flip(self.cos_zenith_bin_edges), weights=1*wobble_observations_bool_arr[i])[0]}")
             print(f"{wobble} livetime per bin: {np.histogram(self.cos_zenith_observations, bins=np.flip(self.cos_zenith_bin_edges), weights=livetime_observations_and_wobble[i])[0].round(0)}")
 
-        fig,ax=plt.subplots(figsize=(5,5))
+        fig,ax=plt.subplots(figsize=figsize)
 
         title = f"Livetime{' per wobble and' * per_wobble} per cos(zd) bin\n"
         if per_wobble:
@@ -1120,7 +1266,7 @@ class BMVCreator(BaseSimBMVtoolCreator):
         ax.set_ylabel('livetime [s]')
         ax2.set_xlabel('cos(zd) bin center in zenith [°]')
 
-        xlim=(self.cos_zenith_bin_edges[-1],self.cos_zenith_bin_edges[0])
+        # xlim=(self.cos_zenith_bin_edges[-1],self.cos_zenith_bin_edges[0])
         ax.set_xlim(xlim)
         ax2.set_xlim(xlim)
         # if 'livetime' in self.cos_zenith_binning_method: ax.hlines([min_cut_per_cos_zenith_bin],xlim[0],xlim[1],ls='-',color='red',label='min livetime',alpha=0.5)
@@ -1145,19 +1291,25 @@ class BMVCreator(BaseSimBMVtoolCreator):
         exclusion_mask.cutout(self.source_pos, self.size_fov_acc).plot(fig=fig)
         plt.show()
     
-    def plot_residuals_histogram(self, skymaps_dict=None) -> plt.figure:
+    def plot_residuals_histogram(self, skymaps_dict=None, cutout_width=None) -> plt.figure:
         if isinstance(skymaps_dict, dict): self.skymaps_dict = skymaps_dict
         elif skymaps_dict is None:
             if not hasattr(self, 'skymaps_dict'): ValueError("No stored skymaps_dict")
         
         if ('significance_all' in self.skymaps_dict.keys()) & ('significance_off' in self.skymaps_dict.keys()):
+            if cutout_width is not None:
+                significance_all_map = self.skymaps_dict["significance_all"].cutout(self.source_pos, cutout_width)
+                significance_off_map = self.skymaps_dict["significance_off"].cutout(self.source_pos, cutout_width)
+            else:
+                significance_all_map = self.skymaps_dict["significance_all"]
+                significance_off_map = self.skymaps_dict["significance_off"]
             geom_map = self.skymaps_dict["significance_all"]._geom
             energy_axis_map = geom_map.axes[0]
             geom_image = geom_map.to_image().to_cube([energy_axis_map.squash()])
             exclusion_mask = geom_image.region_mask(self.exclude_regions, inside=False)
 
-            significance_all = self.skymaps_dict["significance_all"].data[np.isfinite(self.skymaps_dict["significance_all"].data)]
-            significance_off = self.skymaps_dict["significance_off"].data[np.logical_and(np.isfinite(self.skymaps_dict["significance_all"].data), 
+            significance_all = significance_all_map.data[np.isfinite(significance_all_map.data)]
+            significance_off = significance_off_map.data[np.logical_and(np.isfinite(significance_all_map.data), 
                                                                     exclusion_mask.data)]
         else:
             ValueError("Significance maps not in skymaps_dict")
@@ -1207,14 +1359,17 @@ class BMVCreator(BaseSimBMVtoolCreator):
         plt.tight_layout()
         return fig
 
-    def plot_lima_maps(self, dataset, axis_info, cutout=False, method='FoV', fig_save_path=''):
+    def plot_lima_maps(self, dataset, axis_info, method='FoV', estimator='excess', model_source=None, fig_save_path=''):
         '''Compute and store skymaps'''
-        emin_map, emax_map, offset_max, nbin_offset = axis_info
+        emin_map, emax_map, nbin_E_per_decade, offset_max, width = axis_info
         internal_ring_radius,width_ring = self.ring_bkg_param
-        if cutout: dataset = dataset.cutout(position = self.source_pos, width=offset_max)
 
         self.exclusion_mask = get_exclusion_mask_from_dataset_geom(dataset, self.exclude_regions)
-        self.skymaps_dict = get_skymaps_dict(dataset, self.exclude_regions, self.correlation_radius, self.correlate_off, 'all')
+        source_region_is_circle = isinstance(self.exclude_regions[0], CircleSkyRegion)
+        if source_region_is_circle: self.exclusion_radius = self.exclude_regions[0].radius
+        else: self.exclusion_radius = 0 * u.deg
+        
+        self.skymaps_dict = get_skymaps_dict(dataset, self.exclude_regions, self.exclude_regions_not_source, self.correlation_radius, self.correlate_off, 'all', estimator, model_source)
         
         significance_all = self.skymaps_dict["significance_all"]
 
@@ -1224,44 +1379,50 @@ class BMVCreator(BaseSimBMVtoolCreator):
         )
         # fig.delaxes(ax1)
         plt.subplots_adjust(wspace=0.3, hspace=0.3)
-        
-        ax1.set_title("Spatial residuals map: diff/sqrt(model)")
-        dataset.plot_residuals_spatial(method='diff/sqrt(model)',ax=ax1, add_cbar=True, stretch="linear",norm=CenteredNorm())
+        fontsize=15
+        ax3.set_title("Spatial residuals map: diff/sqrt(model)", fontsize=fontsize)
+        dataset.plot_residuals_spatial(method='diff/sqrt(model)',ax=ax3, add_cbar=True, stretch="linear",norm=CenteredNorm())
         # plt.colorbar(g,ax=ax1, shrink=1, label='diff/sqrt(model)')
         
-        ax4.set_title("Significance map")
+        ax5.set_title(f"Significance map ({estimator})\nwith 3$\sigma$ (white) and 5$\sigma$ (blue) contour")
         #significance_map.plot(ax=ax1, add_cbar=True, stretch="linear")
-        self.skymaps_dict["significance_all"].plot(ax=ax4, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma')
+        self.skymaps_dict["significance_all"].plot(ax=ax5, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma')
+        ax5.contour(self.skymaps_dict["significance_all"].data[0], levels=[3,5], colors=['white', 'mediumblue'], alpha=0.5)
         
-        ax5.set_title("Off significance map")
+        ax6.set_title("Off significance map")
         #significance_map.plot(ax=ax1, add_cbar=True, stretch="linear")
-        self.skymaps_dict["significance_off"].plot(ax=ax5, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma')
+        self.skymaps_dict["significance_off"].plot(ax=ax6, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma')
 
-        ax6.set_title("Excess map")
-        self.skymaps_dict["excess"].plot(ax=ax6, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma')
+        if estimator == 'excess':
+            ax4.set_title("Excess map")
+            self.skymaps_dict["excess"].plot(ax=ax4, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma')
+        elif estimator == 'ts':
+            ax4.set_title("TS map")
+            self.skymaps_dict["ts"].plot(ax=ax4, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma')
         
         # Background and counts
 
         ax2.set_title("Background map")
         self.skymaps_dict["background"].plot(ax=ax2, add_cbar=True, stretch="linear")
 
-        ax3.set_title("Counts map")
-        self.skymaps_dict["counts"].plot(ax=ax3, add_cbar=True, stretch="linear")
+        ax1.set_title("Counts map")
+        self.skymaps_dict["counts"].plot(ax=ax1, add_cbar=True, stretch="linear")
         
         if method=='ring':
             ring_center_pos = self.source_pos
-            r1 = SphericalCircle(ring_center_pos, self.exclusion_radius,
+            if source_region_is_circle:
+                r1 = SphericalCircle(ring_center_pos, self.exclusion_radius,
                             edgecolor='yellow', facecolor='none',
-                            transform=ax5.get_transform('icrs'))
+                            transform=ax6.get_transform('icrs'))
+                ax6.add_patch(r1)
             r2 = SphericalCircle(ring_center_pos, internal_ring_radius * u.deg,
                                 edgecolor='white', facecolor='none',
-                                transform=ax5.get_transform('icrs'))
+                                transform=ax6.get_transform('icrs'))
             r3 = SphericalCircle(ring_center_pos, internal_ring_radius * u.deg + width_ring * u.deg,
                                 edgecolor='white', facecolor='none',
-                                transform=ax5.get_transform('icrs'))
-            ax5.add_patch(r2)
-            ax5.add_patch(r1)
-            ax5.add_patch(r3)
+                                transform=ax6.get_transform('icrs'))
+            ax6.add_patch(r2)
+            ax6.add_patch(r3)
         plt.tight_layout()
 
         if fig_save_path == '': fig_save_path=f"{self.plots_dir}/skymaps.png"
@@ -1271,23 +1432,313 @@ class BMVCreator(BaseSimBMVtoolCreator):
         fig = self.plot_residuals_histogram()
         fig.savefig(f"{fig_save_path[:-4]}_sigma_residuals.png", dpi=300, transparent=False, bbox_inches='tight')
 
-    def plot_skymaps(self, bkg_method='ring', stacked_dataset=None, axis_info_dataset=None, axis_info_map=None):
+    def get_dataset_1(self, bkg_method=None, axis_info_dataset=None, unstacked_datasets=None, npix_factor=1, return_stacked=True):
+        source,source_pos,source_region = self.source_info
+        if axis_info_dataset is not None: self.axis_info_dataset = axis_info_dataset
+        emin,emax,nbin_E_per_decade,offset_max,width = self.axis_info_dataset
+
+        if unstacked_datasets is None: self.unstacked_datasets = self.get_unstacked_datasets(axis_info_dataset=self.axis_info_dataset)
+        elif isinstance(unstacked_datasets, Datasets): self.unstacked_datasets = unstacked_datasets
+        
+        # Stack the datasets
+        unstacked_datasets_local = self.unstacked_datasets.copy()
+        geom = unstacked_datasets_local[0]._geom
+        energy_axis=geom.axes["energy"]
+        # Reduced IRFs are defined in true energy (i.e. not measured energy). 
+        # The bounds need to take into account the energy dispersion. 
+        edisp_frac = 0.3
+        emin_true,emax_true = ((1-edisp_frac)*emin , (1+edisp_frac)*emax)
+        nbin_energy_true = 5
+
+        energy_axis_true = MapAxis.from_energy_bounds(
+            emin_true, emax_true, nbin=nbin_energy_true, per_decade=True, unit=energy_axis.unit, name="energy_true"
+        )
+
+        ## Make the exclusion mask
+        if self.region_shape!='noexclusion': exclusion_mask = geom.region_mask(self.exclude_regions, inside=False)
+        else: exclusion_mask=None
+        
+        ## Make the MapDatasetOnOff
+        if bkg_method == 'ring': 
+            internal_ring_radius, width_ring = self.ring_bkg_param
+            ring_bkg_maker = RingBackgroundMaker(r_in=internal_ring_radius * u.deg,
+                                                            width=width_ring * u.deg,
+                                                            exclusion_mask=exclusion_mask)
+            # stacked_on_off = self.unstacked_datasets.copy().stack_reduce()
+            # stacked_on_off = ring_bkg_maker.run(stacked_on_off)
+            print("Ring background method is applied")
+            stacked_on_off = Datasets()
+            for dataset_loc in unstacked_datasets_local:
+                dataset_loc.counts.data[~dataset_loc.mask_safe] = 0
+                dataset_loc = ring_bkg_maker.run(dataset_loc)
+                        
+                stacked_on_off.append(dataset_loc)
+        else: 
+            stacked_on_off = Datasets()
+            if bkg_method == 'FoV':
+                FoV_background_maker = FoVBackgroundMaker(method=self.fov_bkg_param, exclusion_mask=exclusion_mask)
+                print("FoV background method is applied")
+            else: print("No background maker is applied")
+
+            for dataset_loc in unstacked_datasets_local:
+                if bkg_method == 'FoV':
+                    dataset_loc.counts.data[~dataset_loc.mask_safe] = 0
+                    dataset_loc = FoV_background_maker.run(dataset_loc)
+                    if self.fov_bkg_param == 'fit':
+                        fit_result = dataset_loc.models.to_parameters_table()
+                        norm_fit = fit_result[fit_result['name']=='norm']['value'][0]
+                        if norm_fit > 1.5 or norm_fit < 0.5:
+                            print(f"Fit for this dataset {dataset_loc.name} exceeds recommended limits. The norm of the fit is {norm_fit}.")
+                        
+                stacked_on_off.append(dataset_loc)
+            
+        if return_stacked: return stacked_on_off.stack_reduce()
+        else: return stacked_on_off
+    
+    def get_dataset(self, bkg_method=None, axis_info_dataset=None, unstacked_datasets=None, npix_factor=1, bkg_on_stacked_dataset=True, return_stacked=True):
+        source,source_pos,source_region = self.source_info
+        if axis_info_dataset is not None: self.axis_info_dataset = axis_info_dataset
+        emin,emax,nbin_E_per_decade,offset_max,width = self.axis_info_dataset
+
+        if unstacked_datasets is None: self.unstacked_datasets = self.get_unstacked_datasets(axis_info_dataset=self.axis_info_dataset)
+        elif isinstance(unstacked_datasets, Datasets): self.unstacked_datasets = unstacked_datasets
+        
+        # Stack the datasets
+        unstacked_datasets_local = self.unstacked_datasets.copy()
+        geom = unstacked_datasets_local[0]._geom
+        energy_axis=geom.axes["energy"]
+        # Reduced IRFs are defined in true energy (i.e. not measured energy). 
+        # The bounds need to take into account the energy dispersion. 
+        edisp_frac = 0.3
+        emin_true,emax_true = ((1-edisp_frac)*emin , (1+edisp_frac)*emax)
+        nbin_energy_true = 5
+
+        energy_axis_true = MapAxis.from_energy_bounds(
+            emin_true, emax_true, nbin=nbin_energy_true, per_decade=True, unit=energy_axis.unit, name="energy_true"
+        )
+
+        ## Make the exclusion mask
+        if self.region_shape!='noexclusion': exclusion_mask = geom.region_mask(self.exclude_regions, inside=False)
+        else: exclusion_mask=None
+        
+        ## Make the MapDatasetOnOff
+        if bkg_method == 'ring': 
+            internal_ring_radius, width_ring = self.ring_bkg_param
+            bkg_maker = RingBackgroundMaker(r_in=internal_ring_radius * u.deg,
+                                                            width=width_ring * u.deg,
+                                                            exclusion_mask=exclusion_mask)
+            print("Ring background method is applied")
+        elif bkg_method == 'FoV':
+            bkg_maker = FoVBackgroundMaker(method=self.fov_bkg_param, exclusion_mask=exclusion_mask)
+            print("FoV background method is applied")
+        else: print("No background maker is applied")
+        
+        if bkg_on_stacked_dataset:
+            stacked_on_off = unstacked_datasets_local.copy().stack_reduce()
+            if bkg_method in ['ring','FoV']:
+                stacked_on_off.counts.data[~stacked_on_off.mask_safe] = 0
+                stacked_on_off = bkg_maker.run(stacked_on_off)
+            if (bkg_method == 'FoV') and (self.fov_bkg_param == 'fit'):
+                fit_result = stacked_on_off.models.to_parameters_table()
+                norm_fit = fit_result[fit_result['name']=='norm']['value'][0]
+                if norm_fit > 1.5 or norm_fit < 0.5:
+                    print(f"Fit for this dataset {stacked_on_off.name} exceeds recommended limits. The norm of the fit is {norm_fit}.")
+        else:
+            stacked_on_off = Datasets()
+            for dataset_loc in unstacked_datasets_local:
+                dataset_loc.counts.data[~dataset_loc.mask_safe] = 0
+                dataset_loc = bkg_maker.run(dataset_loc)
+                if (bkg_method == 'FoV') and (self.fov_bkg_param == 'fit'):
+                        fit_result = dataset_loc.models.to_parameters_table()
+                        norm_fit = fit_result[fit_result['name']=='norm']['value'][0]
+                        if norm_fit > 1.5 or norm_fit < 0.5:
+                            print(f"Fit for this dataset {dataset_loc.name} exceeds recommended limits. The norm of the fit is {norm_fit}.")
+                        
+                stacked_on_off.append(dataset_loc)
+            if return_stacked: stacked_on_off=stacked_on_off.stack_reduce()
+        return stacked_on_off
+
+    def plot_skymaps(self, bkg_method='ring', unstacked_datasets=None, stacked_dataset=None, axis_info_dataset=None, estimator='excess', model_source=None, map_width_factor=1):
         if axis_info_dataset is not None: self.axis_info_dataset = axis_info_dataset
         # if axis_info_map is not None: self.axis_info_map = axis_info_map
-        
-        if stacked_dataset is None: 
-            self.stacked_dataset = self.get_stacked_dataset(bkg_method=bkg_method, axis_info=self.axis_info_dataset)
-        elif isinstance(stacked_dataset, MapDatasetOnOff): 
+        if (stacked_dataset is None):
+            if (unstacked_datasets is None): self.unstacked_datasets = self.get_unstacked_datasets(axis_info_dataset=self.axis_info_dataset)
+            elif isinstance(unstacked_datasets, Datasets): self.unstacked_datasets = unstacked_datasets
+            elif unstacked_datasets == 'stored': print("Using stored unstacked datasets")
+
+        if stacked_dataset is None:
+            unstacked=self.unstacked_datasets.copy()
+            self.stacked_dataset = self.get_dataset(bkg_method=bkg_method, unstacked_datasets=unstacked)
+        elif isinstance(stacked_dataset, MapDataset) or  isinstance(stacked_dataset, MapDatasetOnOff):
             self.stacked_dataset = stacked_dataset
-            e_min = self.stacked_dataset._geom.axes["energy"].edges.min().to(u.TeV)
-            e_max = self.stacked_dataset._geom.axes["energy"].edges.max().to(u.TeV)
+        elif isinstance(stacked_dataset,str):
+            if stacked_dataset != 'stored': self.load_dataset(stacked_dataset, stacked=True)
+
+        if (stacked_dataset == 'stored') or isinstance(stacked_dataset, MapDatasetOnOff) or isinstance(stacked_dataset, MapDataset): 
+            energy_axis = self.stacked_dataset._geom.axes["energy"]
+            e_min, e_max = energy_axis.bounds
+            nbin_E_per_decade = int(np.rint(energy_axis.nbin_per_decade))
             offset_max = self.stacked_dataset._geom.width.to(u.deg)[0][0]
-            nbin_offset = int(self.stacked_dataset._geom._shape[0]/2)
-            self.axis_info_dataset = [e_min, e_max, offset_max, nbin_offset]
+            width = (self.stacked_dataset._geom.width.to(u.deg)[0][0], self.stacked_dataset._geom.width.to(u.deg)[1][0])
+            self.axis_info_dataset = [e_min, e_max, nbin_E_per_decade, offset_max, width]
         else: ValueError("No valid value for stacked_datasets")
         
         # TO-DO: change this to be able to give different parameters for dataset and map
         self.axis_info_map = self.axis_info_dataset
-        cutout = (self.axis_info_dataset[2] != self.axis_info_map[2]) & (self.axis_info_dataset[2] > self.axis_info_map[2])
-        
-        self.plot_lima_maps(self.stacked_dataset, self.axis_info_dataset, cutout, bkg_method)
+        if map_width_factor != 1:
+            center_pos = SkyCoord(ra=stacked_dataset._geom.center_coord[0],dec=stacked_dataset._geom.center_coord[1],frame='icrs')
+            width =  map_width_factor * stacked_dataset._geom.width[0][0]
+            self.plot_lima_maps(self.stacked_dataset.cutout(center_pos, width), self.axis_info_dataset, bkg_method, estimator, model_source)
+        else: self.plot_lima_maps(self.stacked_dataset, self.axis_info_dataset, bkg_method, estimator, model_source)
+
+    def do_3d_analysis(self, models_to_test:SkyModel, spectral_model_bkg, bkg_method='FoV', fit_method='stacked', unstacked_datasets=None, stacked_dataset=None, axis_info_dataset=None, source_info=None, size_roi=0.16 * u.deg, mask_fit=None, dataset_savenames = ("", "")):
+        if source_info is None: source_info = self.source_info
+        source,source_pos,source_region = source_info
+        if axis_info_dataset is not None: self.axis_info_dataset = axis_info_dataset
+        emin,emax,nbin_E_per_decade,offset_max,width = self.axis_info_dataset
+        unstacked_datasets_savename, stacked_dataset_savename = dataset_savenames
+        save_data_unstacked = unstacked_datasets_savename != ""
+        save_data_stacked = stacked_dataset_savename != ""
+
+        if unstacked_datasets is None: self.unstacked_datasets = self.get_unstacked_datasets(unstacked_datasets_savename = unstacked_datasets_savename)
+        elif isinstance(unstacked_datasets, Datasets): self.unstacked_datasets = unstacked_datasets
+        elif isinstance(unstacked_datasets, str):
+            if unstacked_datasets != 'stored': self.load_dataset(unstacked_datasets, stacked=False)
+
+        # unstacked = self.unstacked_datasets.copy()
+
+        if stacked_dataset is None:
+            if bkg_method == 'ring': self.stacked_dataset = self.get_dataset(bkg_method=bkg_method, unstacked_datasets="stored")
+            else:  self.stacked_dataset = self.get_dataset(bkg_method=bkg_method, bkg_on_stacked_dataset=False, unstacked_datasets="stored")
+        elif isinstance(stacked_dataset, MapDataset) or  isinstance(stacked_dataset, MapDatasetOnOff):
+            self.stacked_dataset = stacked_dataset
+        elif isinstance(stacked_dataset,str):
+            if stacked_dataset != 'stored': self.load_dataset(stacked_dataset, stacked=True)
+        # if save_data_stacked: self.save_dataset(stacked_dataset_savename, self.stacked_dataset, stacked=True)
+
+        # First look
+        stacked = self.stacked_dataset.copy()
+
+        map_width_factor=2.*(self.size_fov_acc/stacked._geom.width[0][0]).value
+        energy_axis=stacked._geom.axes["energy"]
+        self.plot_skymaps(bkg_method, stacked_dataset=stacked, map_width_factor = map_width_factor)
+        skymaps_excess = self.skymaps_dict.copy()
+
+        results = models_to_test.copy()
+        for model_name in results:
+            model_source = results[model_name]["models"]
+            if (fit_method == 'stacked') or (fit_method == 'both'):
+                models_stacked = Models()
+                if model_name not in ["No source","No source - No source"]:
+                    for component in model_source: models_stacked.append(component.copy(name=component.name))
+                    self.plot_skymaps(bkg_method, stacked_dataset=stacked, estimator='ts', model_source=models_stacked[0], map_width_factor=map_width_factor)
+                    skymaps_ts = self.skymaps_dict.copy()
+                    plot_skymap_from_dict(self.skymaps_dict,'flux')
+                    results[model_name]["skymaps_ts"] = skymaps_ts
+                
+                if isinstance(stacked, MapDatasetOnOff): stacked = stacked.to_map_dataset(name=stacked.name)
+                
+                model_bkg_stacked = FoVBackgroundModel(dataset_name=stacked.name, spectral_model=spectral_model_bkg.copy())
+                models_stacked.append(model_bkg_stacked)
+
+                stacked.models = models_stacked
+
+                fit = Fit(optimize_opts={"tol": 0.001, "strategy": 2, "print_level": 1})
+                result = fit.run(datasets=[stacked])
+
+                best_models = stacked.models.copy()
+                minuit = result.optimize_result.minuit
+
+                print(minuit)
+                print(result)
+
+                display(models_stacked.to_parameters_table())
+                
+                results[model_name]["stacked"]={
+                        "fit_result" : result,
+                        "models" : models_stacked.copy()
+                    }
+                
+                for component in models_stacked[:-1]:
+                    region = CircleSkyRegion(component.spatial_model.position, radius=size_roi)
+                    stacked.plot_residuals(
+                        kwargs_spatial=dict(method="diff/sqrt(model)", vmin=-0.5, vmax=0.5),
+                        kwargs_spectral=dict(region=region),
+                    )
+                    plt.show()
+
+                    fpe = FluxPointsEstimator(
+                    energy_edges=energy_axis.edges, source=component.name, selection_optional="all"
+                    )
+                    flux_points_stacked = fpe.run(datasets=stacked)
+                    
+                    results[model_name]["stacked"][component.name]= {
+                        "model" : component.copy(),
+                        "flux_points" : flux_points_stacked
+                    }
+
+            if (fit_method == 'joint') or (fit_method == 'both'):
+                unstacked_with_bkg_model = self.get_dataset(bkg_method=bkg_method, unstacked_datasets="stored",  bkg_on_stacked_dataset=False, return_stacked=False)
+
+                models_joint = Models()
+
+                if model_name != "No source":
+                    for component in model_source: models_joint.append(component.copy(name=component.name))
+                    self.plot_skymaps(bkg_method, stacked_dataset=stacked, estimator='ts', model_source=models_joint[0], map_width_factor=map_width_factor)
+                    skymaps_ts = self.skymaps_dict
+                    plot_skymap_from_dict(self.skymaps_dict,'flux')
+                    results[model_name]["skymaps_ts"] = skymaps_ts
+
+                is_onoff = isinstance(unstacked_with_bkg_model[0], MapDatasetOnOff)
+                if is_onoff: analysis_joint = Datasets()
+                else: analysis_joint = unstacked_with_bkg_model.copy()
+
+                for dataset_loc in unstacked_with_bkg_model.copy():
+                    bkg_model_joint = FoVBackgroundModel(dataset_name=dataset_loc.name, spectral_model=spectral_model_bkg.copy())
+                    models_joint.append(bkg_model_joint)
+                    if is_onoff:
+                        dataset_loc = dataset_loc.to_map_dataset(name=dataset_loc.name)
+                        analysis_joint.append(dataset_loc.copy(name=dataset_loc.name))
+
+                # and set the new model
+                analysis_joint.models = models_joint
+
+                fit_joint = Fit()
+                result_joint = fit_joint.run(datasets=analysis_joint)
+                print(models_joint)
+                display(models_joint.to_parameters_table())
+
+                stacked = analysis_joint.stack_reduce()
+                stacked.models = [models_joint]
+                plt.figure()
+                stacked.plot_residuals_spatial(method='diff/sqrt(model)',vmin=None, vmax=None)
+                plt.show()
+                
+                results[model_name]["joint"]={
+                        "fit_result" : result_joint,
+                        "models" : models_joint.copy()
+                    }
+                
+                for component in models_joint[:-1]:
+                    region = CircleSkyRegion(component.spatial_model.position, radius=size_roi)
+                    stacked.plot_residuals(
+                        kwargs_spatial=dict(method="diff/sqrt(model)", vmin=-0.5, vmax=0.5),
+                        kwargs_spectral=dict(region=region),
+                    )
+                    plt.show()
+
+                    fpe_joint = FluxPointsEstimator(
+                    energy_edges=energy_axis.edges, source=component.name, selection_optional="all"
+                    )
+                    flux_points_joint = fpe.run(datasets=analysis_joint)
+                    
+                    results[model_name]["joint"][component.name]= {
+                        "model" : component.copy(),
+                        "flux_points" : flux_points_joint
+                    }
+
+        self.results_3d = {
+            "skymaps_excess" : skymaps_excess,
+            "results" : results
+        }
+        return self.results_3d

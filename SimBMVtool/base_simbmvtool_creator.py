@@ -137,10 +137,12 @@ class BaseSimBMVtoolCreator(ABC):
         if self.simulator:
             self.source_info = [self.source_name, self.source_pos, None]
             self.flux_to_0 = self.cfg_source["flux_to_0"]
-        
-        # Simulated background
-        if self.simulator or (not self.real_data and not self.external_data): self.lon_grad = self.cfg_background["spatial_model"]["lon_grad"]
-        
+            self.custom_source = self.cfg_source["is_custom"]
+            if self.custom_source:
+                custom_source_dict = self.cfg_source["custom_source"]
+                custom_source_dict["name"] = self.source_name
+                self.source_model = SkyModel.from_dict(custom_source_dict)
+
         # Output backround model (Acceptance parameters are used to define oversampled true IRF)
         self.bkg_dim = self.cfg_acceptance["dimension"]
         self.fov_alignment=self.cfg_acceptance["FoV_alignment"]
@@ -177,28 +179,24 @@ class BaseSimBMVtoolCreator(ABC):
             self.offset_axis_irf = MapAxis.from_bounds(0.*u.deg, self.size_fov_irf, nbin=self.nbin_offset_irf, name='offset')
 
             ## Spectral model
-            factor = self.cfg_background["spectral_model"]["factor"]
-            scale = self.cfg_background["spectral_model"]["scale"]
-            norm = self.cfg_background["spectral_model"]["norm"]
-            unit = self.cfg_background["spectral_model"]["unit"]
-            reference = self.cfg_background["spectral_model"]["reference"]
-            bkg_tilt = factor * scale
-            bkg_norm = Parameter("norm", norm, unit=unit, interp="log", is_norm=True)
-            self.bkg_spectral_model = PowerLawNormSpectralModel(tilt=bkg_tilt, norm=bkg_norm, reference=reference) 
+            bkg_model_dict = self.cfg_background["custom_source"]
+            bkg_spectral_model = PowerLawNormSpectralModel.from_dict(bkg_model_dict["spectral"]) 
 
             ## Spatial model
-            spatial_model = self.cfg_background['spatial_model']["model"]
-            if spatial_model ==  "GaussianSpatialModel":
-                bkg_spatial_model = GaussianSpatialModel(lon_0=self.cfg_background["spatial_model"]["lon_0"]*u.deg, lat_0=self.cfg_background["spatial_model"]["lat_0"]*u.deg, sigma=str(self.cfg_background["spatial_model"]["sigma"])+" "+self.cfg_background["spatial_model"]["unit"],e=self.cfg_background["spatial_model"]["e"],phi=self.cfg_background["spatial_model"]["phi"]*u.deg, frame="AltAz")
-            elif spatial_model ==  "GaussianSpatialModel_LinearGradient":
-                bkg_spatial_model = GaussianSpatialModel_LinearGradient(lon_grad=self.cfg_background["spatial_model"]["lon_grad"]/u.deg,lat_grad=self.cfg_background["spatial_model"]["lat_grad"]/u.deg,lon_0=self.cfg_background["spatial_model"]["lon_0"]*u.deg, lat_0=self.cfg_background["spatial_model"]["lat_0"]*u.deg, sigma=str(self.cfg_background["spatial_model"]["sigma"])+" "+self.cfg_background["spatial_model"]["unit"],e=self.cfg_background["spatial_model"]["e"],phi=self.cfg_background["spatial_model"]["phi"]*u.deg, frame="AltAz")
-            elif spatial_model ==  "GaussianSpatialModel_LinearGradient_half":
-                bkg_spatial_model = GaussianSpatialModel_LinearGradient_half(lon_grad=self.cfg_background["spatial_model"]["lon_grad"]/u.deg,lat_grad=self.cfg_background["spatial_model"]["lat_grad"]/u.deg,lon_0=self.cfg_background["spatial_model"]["lon_0"]*u.deg, lat_0=self.cfg_background["spatial_model"]["lat_0"]*u.deg, sigma=str(self.cfg_background["spatial_model"]["sigma"])+" "+self.cfg_background["spatial_model"]["unit"],e=self.cfg_background["spatial_model"]["e"],phi=self.cfg_background["spatial_model"]["phi"]*u.deg, frame="AltAz")
-            self.bkg_true_model = FoVBackgroundModel(dataset_name="true_model", spatial_model=bkg_spatial_model, spectral_model=self.bkg_spectral_model)
+            spatial_model = self.cfg_background['custom_source']["spatial"]["type"]
+            if spatial_model ==  "GaussianSpatialModel_LinearGradient":
+                bkg_spatial_model = GaussianSpatialModel_LinearGradient.from_dict(bkg_model_dict["spatial"])
+            else: bkg_spatial_model = SpatialModel.from_dict(bkg_model_dict["spatial"])
 
+            self.bkg_true_model = FoVBackgroundModel(dataset_name=bkg_model_dict["name"], spatial_model=bkg_spatial_model, spectral_model=bkg_spectral_model)
+                # Simulated background
+        if self.simulator or (not self.real_data and not self.external_data):
+            self.lon_grad = 0 if spatial_model !=  "GaussianSpatialModel_LinearGradient" else bkg_spatial_model.lon_grad.value
+            self.lat_grad = 0 if spatial_model !=  "GaussianSpatialModel_LinearGradient" else bkg_spatial_model.lat_grad.value
+        
         # Some variables used for the custom plotting methods
         self.axis_info_acceptance = [self.e_min,self.e_max,self.size_fov_acc,self.nbin_offset_acc]
-        self.axis_info_dataset = [self.e_min, self.e_max, self.size_fov_acc, 10 * self.nbin_offset_acc]
+        self.axis_info_dataset = [self.e_min, self.e_max, self.nbin_E_acc, self.size_fov_acc, (2*self.size_fov_acc.to_value(u.deg),2*self.size_fov_acc.to_value(u.deg))]
         self.axis_info_map = [self.e_min, self.e_max, self.size_fov_acc, 10 * self.nbin_offset_acc]
 
         # Simulation
@@ -267,11 +265,19 @@ class BaseSimBMVtoolCreator(ABC):
             self.bkg_true_irf_collection = {}
             self.bkg_true_down_irf_collection = {}
             tmp_config = self.config
-            self.lon_grad_step = np.diff(np.linspace(0,abs(self.lon_grad), self.n_run))[0]
-
             for i_step in range(self.n_run):
-                lon_grad_new = self.lon_grad + i_step * self.lon_grad_step
-                tmp_config["background"]["spatial_model"]["lon_grad"] = lon_grad_new
+                if self.lon_grad !=0:
+                    self.lon_grad_step = np.diff(np.linspace(0,abs(self.lon_grad), self.n_run))[0]
+                    lon_grad_new = self.lon_grad + i_step * self.lon_grad_step
+                    for param in tmp_config['background']['custom_source']['spatial']['parameters']:
+                        if param['name'] == 'lon_grad':
+                            param['value'] = lon_grad_new
+                if self.lat_grad !=0:
+                    self.lat_grad_step = np.diff(np.linspace(0,abs(self.lat_grad), self.n_run))[0]
+                    lat_grad_new = self.lat_grad + i_step * self.lat_grad_step
+                    for param in tmp_config['background']['custom_source']['spatial']['parameters']:
+                        if param['name'] == 'lat_grad':
+                            param['value'] = lat_grad_new
 
                 if (i_step == 0) or  (i_step == self.n_run-1): plot,verbose=(False,True)
                 else: plot,verbose=(False,False)

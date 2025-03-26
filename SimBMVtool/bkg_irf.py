@@ -17,6 +17,7 @@ from regions import CircleAnnulusSkyRegion, CircleSkyRegion
 from gammapy.modeling import Parameter
 from gammapy.modeling.models import (
     FoVBackgroundModel,
+    SpatialModel,
     GaussianSpatialModel,
     PowerLawNormSpectralModel,
 )
@@ -50,8 +51,8 @@ def get_bkg_irf(bkg_map, n_bins_map, energy_axis, offset_axis, bkg_dim, livetime
     spatial_bin_size = max_offset / (n_bins_map / 2)
     center_map = SkyCoord(ra=0. * u.deg, dec=0. * u.deg, frame='icrs')
     geom_irf = WcsGeom.create(skydir=center_map, npix=(n_bins_map, n_bins_map),
-                                binsz=spatial_bin_size, frame="icrs", axes=[energy_axis])      
-
+                                binsz=spatial_bin_size, frame="icrs", axes=[energy_axis])
+    
     if bkg_dim==2:
         if is_WcsNDMap:
             data_background = np.zeros((energy_axis.nbin, offset_axis.nbin)) * u.Unit('s-1 MeV-1 sr-1')
@@ -153,18 +154,9 @@ def get_bkg_true_irf_from_config(config, downsample=True, downsample_only=True, 
     n_run = cfg_simulation["n_run"] # Multiplicative factor for each simulated wobble livetime
     livetime_simu = cfg_simulation["livetime"]
 
-    cfg_source = config["source"]
     cfg_background = config["background"]
     cfg_irf = cfg_background["irf"]
     cfg_acceptance = config["acceptance"]
-
-    catalog = SourceCatalogGammaCat(cfg_paths["gammapy_catalog"])
-
-    src = catalog[cfg_source["catalog_name"]]
-    if verbose:
-        print(src.name,': ',src.position)
-        print(src.spectral_model())
-        print(src.spatial_model())
 
     bkg_dim=cfg_acceptance["dimension"]
 
@@ -186,30 +178,27 @@ def get_bkg_true_irf_from_config(config, downsample=True, downsample_only=True, 
 
     offset_factor=cfg_irf["offset_factor"]
     size_fov_irf = size_fov_acc * offset_factor
-    nbin_offset_irf = nbin_offset_acc * down_factor * cfg_irf["offset_factor"]
+    nbin_offset_irf = nbin_offset_acc * down_factor * offset_factor
     offset_max_irf= size_fov_irf
 
     offset_axis_irf = MapAxis.from_bounds(0.*u.deg, offset_max_irf, nbin=nbin_offset_irf, name='offset')
 
-    factor = cfg_background["spectral_model"]["factor"]
-    scale = cfg_background["spectral_model"]["scale"]
-    bkg_tilt = factor * scale
-    bkg_norm = Parameter("norm", cfg_background["spectral_model"]["norm"], unit=cfg_background["spectral_model"]["unit"], interp="log", is_norm=True)
+    ## Spectral model
+    bkg_model_dict = cfg_background["custom_source"]
+    bkg_spectral_model = PowerLawNormSpectralModel.from_dict(bkg_model_dict["spectral"]) 
 
-    bkg_spectral_model = PowerLawNormSpectralModel(tilt=bkg_tilt, norm=bkg_norm, reference=cfg_background["spectral_model"]["reference"]) 
+    ## Spatial model
+    spatial_model = cfg_background['custom_source']["spatial"]["type"]
+    if spatial_model ==  "GaussianSpatialModel_LinearGradient":
+        bkg_spatial_model = GaussianSpatialModel_LinearGradient.from_dict(bkg_model_dict["spatial"])
+    else: bkg_spatial_model = SpatialModel.from_dict(bkg_model_dict["spatial"])
 
-    if cfg_background['spatial_model']["model"] ==  "GaussianSpatialModel":
-        bkg_spatial_model = GaussianSpatialModel(lon_0=cfg_background["spatial_model"]["lon_0"]*u.deg, lat_0=cfg_background["spatial_model"]["lat_0"]*u.deg, sigma=str(cfg_background["spatial_model"]["sigma"])+" "+cfg_background["spatial_model"]["unit"],e=cfg_background["spatial_model"]["e"],phi=cfg_background["spatial_model"]["phi"]*u.deg, frame="AltAz")
-    elif cfg_background['spatial_model']["model"] ==  "GaussianSpatialModel_LinearGradient":
-        bkg_spatial_model = GaussianSpatialModel_LinearGradient(lon_grad=cfg_background["spatial_model"]["lon_grad"]/u.deg,lat_grad=cfg_background["spatial_model"]["lat_grad"]/u.deg,lon_0=cfg_background["spatial_model"]["lon_0"]*u.deg, lat_0=cfg_background["spatial_model"]["lat_0"]*u.deg, sigma=str(cfg_background["spatial_model"]["sigma"])+" "+cfg_background["spatial_model"]["unit"],e=cfg_background["spatial_model"]["e"],phi=cfg_background["spatial_model"]["phi"]*u.deg, frame="AltAz")
-    elif cfg_background['spatial_model']["model"] ==  "GaussianSpatialModel_LinearGradient_half":
-        bkg_spatial_model = GaussianSpatialModel_LinearGradient_half(lon_grad=cfg_background["spatial_model"]["lon_grad"]/u.deg,lat_grad=cfg_background["spatial_model"]["lat_grad"]/u.deg,lon_0=cfg_background["spatial_model"]["lon_0"]*u.deg, lat_0=cfg_background["spatial_model"]["lat_0"]*u.deg, sigma=str(cfg_background["spatial_model"]["sigma"])+" "+cfg_background["spatial_model"]["unit"],e=cfg_background["spatial_model"]["e"],phi=cfg_background["spatial_model"]["phi"]*u.deg, frame="AltAz")
-    bkg_true_model = FoVBackgroundModel(dataset_name="true_model", spatial_model=bkg_spatial_model, spectral_model=bkg_spectral_model)
+    bkg_true_model = FoVBackgroundModel(dataset_name=bkg_model_dict["name"], spatial_model=bkg_spatial_model, spectral_model=bkg_spectral_model)
     
     if verbose: print(bkg_true_model)
     
     bkg_true_rates = evaluate_bkg(bkg_dim,bkg_true_model,energy_axis_irf,offset_axis_irf)
-    bkg_true_irf = get_bkg_irf(bkg_true_rates, 2*nbin_offset_irf, energy_axis_irf, offset_axis_irf, bkg_dim,FoV_alignment=cfg_acceptance["FoV_alignment"])
+    bkg_true_irf = get_bkg_irf(bkg_true_rates, 2*nbin_offset_irf, energy_axis_irf, offset_axis_irf, bkg_dim, FoV_alignment=cfg_acceptance["FoV_alignment"])
     
     if not downsample: 
         return bkg_true_irf

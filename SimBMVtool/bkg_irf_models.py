@@ -121,7 +121,7 @@ class GaussianSpatialModel_LinearGradient(SpatialModel):
         lat_grad_factor = (lat * lat_grad).to_value("")
         if (lat_grad_factor < -1).any(): lat_grad_factor[np.where(lat_grad_factor < -1)] = -1
 
-        norm *=  (1 + lon_grad_factor) * (1 +lat_grad_factor ) 
+        norm *=  (1 + lon_grad_factor) * (1 + lat_grad_factor ) 
         exponent = -0.5 * ((1 - np.cos(sep)) / a)
         return u.Quantity(norm * np.exp(exponent).value, "sr-1", copy=COPY_IF_NEEDED)
     
