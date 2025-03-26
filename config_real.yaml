@@ -43,6 +43,7 @@ acceptance:
   method: stack # stack,fit
   out_collection: True # False if same output IRF for all runs, like with pybkgmodel
   FoV_alignment: ALTAZ # ALTAZ, RADEC
+  fov_rotation_error_limit: 1                 # [deg] maximum estimated FoV rotation error before re-evaluation of the background IRF evaluation by gammapy
   energy:
     e_min: 0.2
     e_max: 40

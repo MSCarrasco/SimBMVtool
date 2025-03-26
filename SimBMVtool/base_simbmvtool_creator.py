@@ -146,6 +146,8 @@ class BaseSimBMVtoolCreator(ABC):
         # Output backround model (Acceptance parameters are used to define oversampled true IRF)
         self.bkg_dim = self.cfg_acceptance["dimension"]
         self.fov_alignment=self.cfg_acceptance["FoV_alignment"]
+        if "fov_rotation_error_limit" in list(self.cfg_acceptance.keys()):
+            self.fov_rotation_error_limit=self.cfg_acceptance["fov_rotation_error_limit"] * u.deg
 
         self.e_min, self.e_max = float(self.cfg_acceptance["energy"]["e_min"])* u.TeV, float(self.cfg_acceptance["energy"]["e_max"])*u.TeV
         self.size_fov_acc = float(self.cfg_acceptance["offset"]["offset_max"]) * u.deg
@@ -207,7 +209,6 @@ class BaseSimBMVtoolCreator(ABC):
             self.t_ref = self.cfg_simulation["t_ref"]
             self.delay = self.cfg_simulation["delay"]
             self.time_oversampling = self.cfg_simulation["time_oversampling"] * u.s
-            self.fov_rotation_error_limit = self.cfg_simulation["fov_rotation_error_limit"] * u.deg
         
             self.single_pointing = self.cfg_simulation["single_pointing"] # Code will just use wobble_1 informations
             self.obs_collection_type = self.cfg_simulation["obs_collection_type"]

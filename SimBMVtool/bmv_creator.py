@@ -602,13 +602,19 @@ class BMVCreator(BaseSimBMVtoolCreator):
 
         is_pointlike = self.obs_collection[0].aeff.data.shape[1] == 1
         maps = ["counts", "background"]
-        if is_pointlike: maker = MapDatasetMaker(selection=maps)
+        if is_pointlike:
+            if hasattr(MapDatasetMaker(),'fov_rotation_error_limit'):
+                maker = MapDatasetMaker(selection=maps, fov_rotation_error_limit=self.fov_rotation_error_limit)
+            else: maker = MapDatasetMaker(selection=maps)
         else:
             if self.obs_collection[0].psf is not None: maps.append("psf")
             if self.obs_collection[0].edisp is not None: maps.append("edisp")
             maps.append("exposure")
 
-            maker = MapDatasetMaker(selection=maps)
+            if hasattr(MapDatasetMaker(),'fov_rotation_error_limit'):
+                maker = MapDatasetMaker(selection=maps, fov_rotation_error_limit=self.fov_rotation_error_limit)
+            else: maker = MapDatasetMaker(selection=maps)
+
         maker_safe_mask = SafeMaskMaker(methods=["offset-max"], offset_max=offset_max)
         
         for obs in self.obs_collection:
@@ -1106,13 +1112,19 @@ class BMVCreator(BaseSimBMVtoolCreator):
                 geom=get_geom(geom_irf,None,run_info)
 
                 if plot_true_data:
-                    map_true = make_map_background_irf(pointing_info, ontime, true, geom, oversampling=oversampling, use_region_center=True, obstime=obstime, fov_rotation_error_limit=self.fov_rotation_error_limit)
+                    if hasattr(MapDatasetMaker(),'fov_rotation_error_limit') and ("fov_rotation_error_limit" in list(self.cfg_acceptance.keys())):
+                        map_true = make_map_background_irf(pointing_info, ontime, true, geom, oversampling=oversampling, use_region_center=True, obstime=obstime, fov_rotation_error_limit=self.fov_rotation_error_limit)
+                    else:
+                        map_true = make_map_background_irf(pointing_info, ontime, true, geom, oversampling=oversampling, use_region_center=True, obstime=obstime)
                     map_true_cut = map_true.cutout(position=pointing,width=2*offset_max)
                     map_true_cut.sum_over_axes(["energy"]).plot()
                     true = map_true.data
 
                 if plot_out_data:
-                    map_out = make_map_background_irf(pointing_info, ontime, out, geom, oversampling=oversampling, use_region_center=True, obstime=obstime, fov_rotation_error_limit=self.fov_rotation_error_limit)
+                    if hasattr(MapDatasetMaker(),'fov_rotation_error_limit') and ("fov_rotation_error_limit" in list(self.cfg_acceptance.keys())):
+                        map_out = make_map_background_irf(pointing_info, ontime, out, geom, oversampling=oversampling, use_region_center=True, obstime=obstime, fov_rotation_error_limit=self.fov_rotation_error_limit)
+                    else:
+                        map_out = make_map_background_irf(pointing_info, ontime, out, geom, oversampling=oversampling, use_region_center=True, obstime=obstime)
                     map_out_cut = map_true.cutout(position=pointing,width=2*offset_max)
                     map_out_cut.sum_over_axes(["energy"]).plot()
                     out = map_out.data

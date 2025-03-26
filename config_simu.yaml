@@ -3,7 +3,7 @@ paths:
   path_data: ./gammapy-datasets/dev/hess-dl3-dr1/data # Path to dl3 files containing the full-enclosure IRFs
   models: ./SimBMVtool/models.yaml
   gammapy_catalog: gammapy-datasets/dev/catalogs/gammacat/gammacat.fits.gz
-  output_dir: ./outputs
+  output_dir: ../outputs_dev
   subdir: crab_hess_bkg_only
 data:
   run_list: [] # None, array of obs_ids
@@ -31,7 +31,6 @@ simulation:
   t_ref: '2024-10-05 23:00:00'                # The first run starting time. The altaz pointing will depend on this date
   delay: 600                                  # [s]
   time_oversampling: 300                      # [s] time step between subdatasets, i.e. maximum time step for background IRF evaluation
-  fov_rotation_error_limit: 1                 # [deg] maximum estimated FoV rotation error before re-evaluation of the background IRF evaluation by gammapy
 source:
   catalog_name: Crab nebula                   # Catalog name. If not found, will use coordinates given in config
   coordinates:
@@ -104,6 +103,7 @@ acceptance:
   out_collection: True
   true_collection: False        # If False, the same background IRF is used as true irf for all observations
   FoV_alignment: ALTAZ          # ALTAZ, RADEC
+  fov_rotation_error_limit: 1                 # [deg] maximum estimated FoV rotation error before re-evaluation of the background IRF evaluation by gammapy
   energy:
     e_min: 0.5
     e_max: 10

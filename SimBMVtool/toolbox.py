@@ -211,7 +211,7 @@ def get_empty_obs_simu(Bkg_irf, axis_info, run_info, src_models, path_data:str,f
 
     return obs
 
-def get_empty_dataset_and_obs_simu(Bkg_irf, axis_info, run_info, src_models, path_data:str,flux_to_0=True, t_ref_str="2000-01-01 00:00:00", t_delay=0,verbose=False):
+def get_empty_dataset_and_obs_simu(Bkg_irf, axis_info, run_info, src_models, path_data:str,flux_to_0=True, t_ref_str="2000-01-01 00:00:00", t_delay=0, fov_rotation_error_limit=1 * u.deg, verbose=False):
     '''Loads irf from file and return a simulated observation with its associated dataset'''
 
     loc, source_pos, run, livetime, pointing, file_name = run_info
@@ -293,7 +293,12 @@ def get_empty_dataset_and_obs_simu(Bkg_irf, axis_info, run_info, src_models, pat
         name="my-dataset",
     )
 
-    maker = MapDatasetMaker(selection=["exposure", "background", "edisp"], fov_rotation_error_limit=1 * u.deg)
+    maps=["exposure", "background", "edisp", "psf"]
+    if hasattr(MapDatasetMaker(),'fov_rotation_error_limit'):
+        maker = MapDatasetMaker(selection=maps, fov_rotation_error_limit=fov_rotation_error_limit)
+    else:
+        maker = MapDatasetMaker(selection=maps)
+    
     dataset = maker.run(empty, obs)
     if verbose: print(obs.obs_info)
     if verbose: print(dataset)
