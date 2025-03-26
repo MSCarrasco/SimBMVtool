@@ -1,10 +1,10 @@
 ---
 paths:
-  path_data: ./crab_LZA_data
+  path_data: /Users/carrasco/Prog/gammapy/data/test_dl3_fastoff
+  gammapy_catalog: /Users/carrasco/Prog/gammapy/gdata/gammapy_datasets/dev/catalogs/gammacat/gammacat.fits.gz 
   models: ./SimBMVtool/models.yaml
-  gammapy_catalog: gammapy_datasets/dev/catalogs/gammacat/gammacat.fits.gz
-  output_dir: ./outputs
-  subdir: crab_LZA
+  output_dir: ../outputs_dev
+  subdir: fastoffline
 data:
   run_list: [] # None, array of obs_ids
   obs_pattern: dl3_*
@@ -16,47 +16,47 @@ source:
     ra: 83.63308
     dec: 22.0145
   exclusion_region:
-    shape: n_shapes # n_shapes, noexclusion
+    shape: n_shapes # n_circles, ellipse, noexclusion
     regions:
       circle_1:                               # Crab
-        radius: 0.1
+        radius: 0.35
         ra: 83.63308
         dec: 22.0145
         is_source: True
-      # circle_2:                               # Zeta tauri, commented for tutorial purpose  
-      #   radius: 0.4
-      #   ra: 84.4125
-      #   dec: 21.1425
-      #   is_source: False
+      circle_2:                               # Zeta tauri 
+        radius: 0.4
+        ra: 84.4125
+        dec: 21.1425
+        is_source: False
 background:
   maker:
     correlation_radius: 0.08    # [deg]
     correlate_off: True
     ring:
-      internal_ring_radius: 0.1 # [deg]
+      internal_ring_radius: 0.08 # [deg]
       width: 0.35                # [deg]
     fov:
       method: fit # scale, fit
 acceptance:
   dimension: 3
   tool: baccmod
-  method: stack # stack,fit
-  out_collection: True # False if same output IRF for all runs, like with pybkgmodel
+  method: fit # stack,fit
+  out_collection: True
   FoV_alignment: ALTAZ # ALTAZ, RADEC
   energy:
     e_min: 0.2
-    e_max: 40
+    e_max: 10
     unit: TeV
-    nbin: 3
+    nbin: 6
   offset:
-    offset_max: 2.5           # [deg]
-    nbin: 11
+    offset_max: 2.          # [deg]
+    nbin: 5
   cos_zenith_binning:
     zenith_binning: False
     initial_cos_zenith_binning: 0.01
     runwise_normalisation: False
     cos_zenith_binning_method: min_livetime_per_wobble
-    cos_zenith_binning_parameter_value: 3000    # [s] if 'livetime' in method, n_obs if 'observation' in method
+    cos_zenith_binning_parameter_value: 2000    # [s] if 'livetime' in method, n_obs if 'observation' in method
   fit:
     fnc: bilinear_gaussian2d
     bounds:
