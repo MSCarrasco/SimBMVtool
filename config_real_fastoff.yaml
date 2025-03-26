@@ -1,9 +1,9 @@
 ---
 paths:
-  path_data: /Users/carrasco/Prog/gammapy/data/test_dl3_fastoff
-  gammapy_catalog: /Users/carrasco/Prog/gammapy/gdata/gammapy_datasets/dev/catalogs/gammacat/gammacat.fits.gz 
+  path_data: <path_to_test_dl3_fastoff>
+  gammapy_catalog: ./gammapy-extra/datasets/catalogs/gammacat/gammacat.fits.gz 
   models: ./SimBMVtool/models.yaml
-  output_dir: ../outputs_dev
+  output_dir: ./outputs
   subdir: fastoffline
 data:
   run_list: [] # None, array of obs_ids
