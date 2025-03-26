@@ -46,7 +46,6 @@ from gammapy.catalog import SourceCatalogGammaCat
 from scipy.stats import norm as norm_stats
 from gammapy.stats import CashCountsStatistic
 from gammapy.modeling import Parameter, Parameters
-from gammapy.utils.compat import COPY_IF_NEEDED
 
 def compute_sigma_eff(lon_0, lat_0, lon, lat, phi, major_axis, e):
     """Effective radius, used for the evaluation of elongated models."""
@@ -123,7 +122,7 @@ class GaussianSpatialModel_LinearGradient(SpatialModel):
 
         norm *=  (1 + lon_grad_factor) * (1 + lat_grad_factor ) 
         exponent = -0.5 * ((1 - np.cos(sep)) / a)
-        return u.Quantity(norm * np.exp(exponent).value, "sr-1", copy=COPY_IF_NEEDED)
+        return u.Quantity(norm * np.exp(exponent).value, "sr-1", copy=True)
     
 class GaussianSpatialModel_LinearGradient_half(SpatialModel):
     r"""Two-dimensional Gaussian model.
@@ -188,4 +187,4 @@ class GaussianSpatialModel_LinearGradient_half(SpatialModel):
 
         norm *=  (1 + lon_grad_factor) * (1 +lat_grad_factor ) 
         exponent = -0.5 * ((1 - np.cos(sep)) / a)
-        return u.Quantity(norm * np.exp(exponent).value, "sr-1", copy=COPY_IF_NEEDED)
+        return u.Quantity(norm * np.exp(exponent).value, "sr-1", copy=True)

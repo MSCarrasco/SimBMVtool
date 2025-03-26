@@ -49,10 +49,6 @@ from scipy.stats import chi2
 from scipy.stats import norm as norm_stats
 from gammapy.stats import CashCountsStatistic
 from gammapy.modeling import Parameter, Parameters
-from gammapy.utils.compat import COPY_IF_NEEDED
-
-fov_rotation_time_step = 100000 * u.s
-
 
 #-------------------------------------------------------------------------------------
 # Data management
@@ -507,19 +503,22 @@ def plot_skymap_from_dict(skymaps, key, crop_width=0 * u.deg, ring_bkg_param=Non
     cbar_label, title = (skymaps_args[key]["cbar_label"], skymaps_args[key]["title"])
     
     fig,ax=plt.subplots(figsize=figsize,subplot_kw={"projection": skymap.geom.wcs})
-    if key in ['counts', 'background']: skymap.plot(ax=ax, add_cbar=True, stretch="linear",kwargs_colorbar={'label': cbar_label})
-    elif key in ['excess', 'ts', 'flux']: skymap.plot(ax=ax, add_cbar=True, stretch="linear", cmap='magma',kwargs_colorbar={'label': cbar_label})
+    if key in ['counts', 'background']: skymap.plot(ax=ax, add_cbar=True, stretch="linear")
+    elif key in ['excess', 'ts', 'flux']: skymap.plot(ax=ax, add_cbar=True, stretch="linear", cmap='magma')
     elif 'significance' in key: 
-        skymap.plot(ax=ax, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma',kwargs_colorbar={'label': cbar_label})
+        skymap.plot(ax=ax, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma')
         ax.contour(skymap.data[0], levels=[3,5], colors=['white', 'red'], alpha=0.5)
         maxsig = np.nanmax(skymap.data)
         minsig = np.nanmin(skymap.data)
-        im = ax.images        
-        cb = im[-1].colorbar 
+        im = ax.images
+        cb = im[-1].colorbar
         cb.ax.axhline(maxsig, c='g')
         cb.ax.text(1.1,maxsig - 0.07,' max', color = 'g')
         cb.ax.axhline(minsig, c='g')
         cb.ax.text(1.1,minsig - 0.07,' min', color = 'g')
+    im = ax.images
+    cb = im[-1].colorbar 
+    cb.ax.set_ylabel(cbar_label)
     if (ring_bkg_param is not None):
             if hasattr(ring_bkg_param,'__len__') & (len(ring_bkg_param)==2):
                 int_rad, width = ring_bkg_param
@@ -773,7 +772,7 @@ def plot_spatial_model_from_dict(bkg_method, key, results, ref_models, ref_sourc
         maxsig = np.nanmax(skymap.data)
         minsig = np.nanmin(skymap.data)
         im = ax.images        
-        cb = im[-1].colorbar 
+        cb = im[-1].colorbar
         cb.ax.axhline(maxsig, c='g')
         cb.ax.text(1.1,maxsig - 0.07,' max', color = 'g')
         cb.ax.axhline(minsig, c='g')

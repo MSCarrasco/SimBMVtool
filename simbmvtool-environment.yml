@@ -1,0 +1,48 @@
+# Conda environment for SimBMVtool
+# Install:    conda env create -f simbmvtool-environment.yml
+# Activate:   conda activate simbmvtool_env
+# Deactivate: conda deactivate
+
+name: simbmvtool_env
+
+channels:
+  - conda-forge
+  - sherpa
+
+variables:
+  PYTHONNOUSERSITE: "1"
+
+dependencies:
+  # core dependencies
+  - python=3.11
+  - gammapy=1.1
+  - pip
+  - astropy=5.3
+  - click
+  - cython
+  - numpy>1.20
+  - pydantic>=2.5
+  - pyyaml
+  - regions>=0.5
+  - matplotlib=3.7
+  - scipy=1.11.4
+  - iminuit>=2.8.0
+  - extension-helpers
+  # test dependencies
+  - requests
+  - tqdm
+  # extra dependencies
+  - healpy
+  - ipython
+  - jupyter
+  - jupyterlab
+  - naima
+  - pandas
+  - pip:
+      - sherpa
+      - pytest-sphinx
+      - ray[default]>=2.9
+      - PyGithub
+      - pypandoc
+      - seaborn
+      - BAccMod==0.3.0

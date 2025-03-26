@@ -2,7 +2,7 @@ import os.path
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '.'))
 
-from gammapy.data import Observations, PointingMode, ObservationMetaData
+from gammapy.data import Observations, PointingMode
 import math
 import numpy as np
 import astropy.units as u
@@ -53,7 +53,15 @@ from scipy.stats import norm as norm_stats
 from scipy.stats import normaltest, shapiro
 from gammapy.stats import CashCountsStatistic
 from gammapy.modeling import Parameter, Parameters
-from gammapy.utils.compat import COPY_IF_NEEDED
+
+import gammapy
+gammapy_v = gammapy.__version__
+gammapy_custom = '0.8.dev17165+g9e45af09c.d20241210'
+from gammapy.data import Observations, PointingMode
+if gammapy_v == gammapy_custom:
+    from gammapy.irf import Background3D
+else: from gammapy.irf.background import Background3D
+
 
 from itertools import product
 from baccmod import RadialAcceptanceMapCreator, Grid3DAcceptanceMapCreator, BackgroundCollectionZenith
@@ -62,7 +70,6 @@ from baccmod.toolbox import (get_unique_wobble_pointings)
 from abc import ABC, abstractmethod
 from typing import Tuple, List, Optional, Union
 from gammapy.datasets import MapDatasetEventSampler
-from gammapy.irf import Background3D, BackgroundIRF
 from gammapy.makers.utils import make_map_background_irf
 
 from toolbox import (get_value_at_threshold,

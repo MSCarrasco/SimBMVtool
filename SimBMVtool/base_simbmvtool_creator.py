@@ -15,7 +15,12 @@ from bkg_irf import (evaluate_bkg,
                     get_cut_downsampled_irf_from_map,
                     get_bkg_true_irf_from_config)
 
-from gammapy.data import Observations, PointingMode, ObservationMetaData
+import gammapy
+gammapy_v = gammapy.__version__
+gammapy_custom = '0.8.dev17165+g9e45af09c.d20241210'
+from gammapy.data import Observations, PointingMode
+if gammapy_v == gammapy_custom:
+    from gammapy.data import ObservationMetaData
 import math
 import numpy as np
 import astropy.units as u
@@ -64,7 +69,6 @@ from gammapy.catalog import SourceCatalogGammaCat, SourceCatalogObject
 from scipy.stats import norm as norm_stats
 from gammapy.stats import CashCountsStatistic
 from gammapy.modeling import Parameter, Parameters
-from gammapy.utils.compat import COPY_IF_NEEDED
 
 from itertools import product
 from baccmod import RadialAcceptanceMapCreator, Grid3DAcceptanceMapCreator, BackgroundCollectionZenith
@@ -73,7 +77,8 @@ from baccmod.toolbox import (get_unique_wobble_pointings)
 from abc import ABC, abstractmethod
 from typing import Tuple, List, Optional, Union
 from gammapy.datasets import MapDatasetEventSampler
-from gammapy.irf import Background3D, BackgroundIRF
+if gammapy_v == gammapy_custom: from gammapy.irf import Background3D, BackgroundIRF
+else: from gammapy.irf.background import Background3D, BackgroundIRF
 from gammapy.makers.utils import make_map_background_irf
 
 logger = logging.getLogger(__name__)
@@ -356,7 +361,10 @@ class BaseSimBMVtoolCreator(ABC):
                     meta_dict.__setitem__('GEOLAT',str(self.loc.lat.value))
                     meta_dict.__setitem__('GEOALT',str(self.loc.height.to_value(u.m)))
                     meta_dict.__setitem__('deadtime_fraction',str(1-meta_dict['DEADC']))
-                    self.obs_collection[iobs]._meta = ObservationMetaData.from_header(meta_dict)
+                    if gammapy_v == gammapy_custom:
+                        self.obs_collection[iobs]._meta = ObservationMetaData.from_header(meta_dict)
+                    else:
+                        self.obs_collection[iobs].events.meta = meta_dict
                     self.obs_collection[iobs]._location = self.loc
                     self.obs_collection[iobs].pointing._location = self.loc
                     # self.obs_collection[iobs].obs_info['observatory_earth_location'] = self.loc # <- modifié pour être accessible à l'intérieur de la méthode qui récupère le pointé
