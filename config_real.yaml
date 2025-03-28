@@ -54,6 +54,8 @@ acceptance:
     nbin: 11
   cos_zenith_binning:
     zenith_binning: False
+    zenith_interpolation: True
+    zenith_binning_run_splitting: True
     initial_cos_zenith_binning: 0.01
     runwise_normalisation: False
     cos_zenith_binning_method: min_livetime_per_wobble
