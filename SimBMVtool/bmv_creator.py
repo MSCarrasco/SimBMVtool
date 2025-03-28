@@ -275,11 +275,7 @@ class BMVCreator(BaseSimBMVtoolCreator):
                 paths = list(Path(self.acceptance_files_dir).rglob("acceptance_*.fits"))
                 self.all_obs_ids = np.arange(len(paths))+1
             self.obs_ids = self.all_obs_ids if self.run_list.shape[0] == 0 else self.run_list
-            if self.real_data:
-                for iobs,obs_id in enumerate(self.obs_ids): self.bkg_output_irf_collection[iobs] = Background3D.read(f'{self.acceptance_files_dir}/acceptance_obs-{obs_id}.fits')
-            else:
-
-                for obs_id in self.obs_ids: self.bkg_output_irf_collection[int(obs_id)] = Background3D.read(f'{self.acceptance_files_dir}/acceptance_obs-{obs_id}.fits')
+            for iobs,obs_id in enumerate(self.obs_ids): self.bkg_output_irf_collection[iobs] = Background3D.read(f'{self.acceptance_files_dir}/acceptance_obs-{obs_id}.fits')
         else:
             self.bkg_output_irf = Background3D.read(self.single_file_path)
     
@@ -440,7 +436,7 @@ class BMVCreator(BaseSimBMVtoolCreator):
             collection_output = []
             collection_obs = Observations()
             for iobs in iobs_in_coszd_bin:
-                if "true" in collections: 
+                if "true" in collections:
                     collection_true.append(self.bkg_true_down_irf_collection[iobs])
                     if iobs == iobs_in_coszd_bin[-1]: 
                         values_true.append(collection_true)
@@ -835,9 +831,9 @@ class BMVCreator(BaseSimBMVtoolCreator):
         title='Offset'
         xlabel="FoV offset bin center [°]"
         ylabel=f'Bias {stat.capitalize()} [%]'
-        xlim = [0, fov_edges[-1]+ np.diff(radius_centers)[-1]]
+        xlim = [0, fov_edges[-1]]
         ylim = [1e-4,2]
-        if bias: suptitle += ': bias p-value ($\sqrt{diff/true}$)' 
+        if bias: suptitle += ': bias p-value (diff/$\sqrt{true}$)' 
 
         fig, ax = plt.subplots(figsize=(12,4))
 
@@ -1092,7 +1088,7 @@ class BMVCreator(BaseSimBMVtoolCreator):
                     out.data /= (i)
                 else: print(f"No model in zenith bin with mean zd = {np.rad2deg(np.arccos(i_irf)):.1f}°")
             else:
-                if self.out_collection: out = self.bkg_output_irf_collection[i_irf+1]
+                if self.out_collection: out = self.bkg_output_irf_collection[i_irf]
                 else: out = self.bkg_output_irf
         
         plot_residuals_data = (residuals != "none") & (plot_true_data+plot_out_data == 2)

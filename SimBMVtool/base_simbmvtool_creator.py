@@ -274,13 +274,13 @@ class BaseSimBMVtoolCreator(ABC):
             for i_step in range(self.n_run):
                 if self.lon_grad !=0:
                     self.lon_grad_step = np.diff(np.linspace(0,abs(self.lon_grad), self.n_run))[0]
-                    lon_grad_new = self.lon_grad + i_step * self.lon_grad_step
+                    lon_grad_new = i_step * self.lon_grad_step
                     for param in tmp_config['background']['custom_source']['spatial']['parameters']:
                         if param['name'] == 'lon_grad':
                             param['value'] = lon_grad_new
                 if self.lat_grad !=0:
                     self.lat_grad_step = np.diff(np.linspace(0,abs(self.lat_grad), self.n_run))[0]
-                    lat_grad_new = self.lat_grad + i_step * self.lat_grad_step
+                    lat_grad_new = i_step * self.lat_grad_step
                     for param in tmp_config['background']['custom_source']['spatial']['parameters']:
                         if param['name'] == 'lat_grad':
                             param['value'] = lat_grad_new
@@ -289,8 +289,9 @@ class BaseSimBMVtoolCreator(ABC):
                 else: plot,verbose=(False,False)
 
                 bkg_true_irf, bkg_true_down_irf = get_bkg_true_irf_from_config(tmp_config,downsample=True,downsample_only=False,plot=plot,verbose=verbose)
-                self.bkg_true_irf_collection[i_step] = bkg_true_irf
-                self.bkg_true_down_irf_collection[i_step] = bkg_true_down_irf
+                for i_wobble in range(len(self.wobble_pointings)):
+                    self.bkg_true_irf_collection[i_step + i_wobble*self.n_run] = bkg_true_irf
+                    self.bkg_true_down_irf_collection[i_step + i_wobble*self.n_run] = bkg_true_down_irf
         else:
             self.bkg_true_irf, self.bkg_true_down_irf = get_bkg_true_irf_from_config(self.config,downsample=True,downsample_only=False,plot=False,verbose=True)
             
