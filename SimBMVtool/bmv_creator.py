@@ -210,6 +210,8 @@ class BMVCreator(BaseSimBMVtoolCreator):
         # BAccMod parameters also used for zenith binning SimBMVtool methods
         self.cos_zenith_binning = self.cfg_acceptance["cos_zenith_binning"]
         self.zenith_binning=self.cos_zenith_binning["zenith_binning"]
+        self.zenith_interpolation=self.cos_zenith_binning["zenith_interpolation"]
+        self.zenith_binning_run_splitting=self.cos_zenith_binning["zenith_binning_run_splitting"]
         self.initial_cos_zenith_binning=self.cos_zenith_binning['initial_cos_zenith_binning']
         self.cos_zenith_binning_method=self.cos_zenith_binning['cos_zenith_binning_method']
         self.cos_zenith_binning_parameter_value=self.cos_zenith_binning['cos_zenith_binning_parameter_value']
@@ -497,6 +499,7 @@ class BMVCreator(BaseSimBMVtoolCreator):
                                                                 self.offset_axis_acceptance,
                                                                 exclude_regions=self.exclude_regions_bkg_irf,
                                                                 initial_cos_zenith_binning=self.initial_cos_zenith_binning,
+                                                                zenith_binning_run_splitting=self.zenith_binning_run_splitting,
                                                                 cos_zenith_binning_method=self.cos_zenith_binning_method,
                                                                 cos_zenith_binning_parameter_value=self.cos_zenith_binning_parameter_value)
         elif self.bkg_dim==3:
@@ -504,13 +507,15 @@ class BMVCreator(BaseSimBMVtoolCreator):
                                                             self.offset_axis_acceptance,
                                                             exclude_regions=self.exclude_regions_bkg_irf,
                                                             initial_cos_zenith_binning=self.initial_cos_zenith_binning,
+                                                            zenith_binning_run_splitting=self.zenith_binning_run_splitting,
                                                             cos_zenith_binning_method=self.cos_zenith_binning_method,
                                                             cos_zenith_binning_parameter_value=self.cos_zenith_binning_parameter_value,
                                                             method=self.method,
                                                             fit_fnc=self.fit_fnc,
                                                             fit_bounds=self.fit_bounds)
 
-        acceptance_model = acceptance_model_creator.create_acceptance_map_per_observation(self.obs_collection,zenith_binning=self.zenith_binning,runwise_normalisation=self.runwise_normalisation) 
+        acceptance_model = acceptance_model_creator.create_acceptance_map_per_observation(self.obs_collection,zenith_binning=self.zenith_binning,
+                                                                                          zenith_interpolation=self.zenith_interpolation,runwise_normalisation=self.runwise_normalisation) 
 
         if not self.multiple_simulation_subdir:
             # For each observation get the acceptance map, save it and add the saved file path to the data store as a background map
@@ -1335,7 +1340,7 @@ class BMVCreator(BaseSimBMVtoolCreator):
 
         fig, ax1 = plt.subplots(figsize=(4,4))
         ax1.hist(
-            significance_all,
+            significance_all[significance_all != 0],
             range=(-8,8),
             density=True,
             alpha=0.5,
@@ -1345,7 +1350,7 @@ class BMVCreator(BaseSimBMVtoolCreator):
         )
 
         ax1.hist(
-            significance_off,
+            significance_off[significance_off != 0],
             range=(-8,8),
             density=True,
             alpha=0.5,
@@ -1361,7 +1366,7 @@ class BMVCreator(BaseSimBMVtoolCreator):
         ax1.plot(x, p, lw=2, color="black")
         p2 = norm_stats.pdf(x, 0, 1)
         #ax.plot(x, p2, lw=2, color="green")
-        ax1.set_title(f"Background residuals map E= {emin_map:.1f} - {emax_map:.1f}")
+        ax1.set_title(f"Significance distribution\nE= {emin_map:.1f} - {emax_map:.1f}")
         ax1.text(-2.,0.001, f'mu = {mu:3.2f}\nstd={std:3.2f}',fontsize=14, fontweight='bold')
         ax1.legend()
         ax1.set_xlabel("Significance")
@@ -1425,11 +1430,6 @@ class BMVCreator(BaseSimBMVtoolCreator):
         
         if method=='ring':
             ring_center_pos = self.source_pos
-            if source_region_is_circle:
-                r1 = SphericalCircle(ring_center_pos, self.exclusion_radius,
-                            edgecolor='yellow', facecolor='none',
-                            transform=ax6.get_transform('icrs'))
-                ax6.add_patch(r1)
             r2 = SphericalCircle(ring_center_pos, internal_ring_radius * u.deg,
                                 edgecolor='white', facecolor='none',
                                 transform=ax6.get_transform('icrs'))
