@@ -277,9 +277,12 @@ class BMVCreator(BaseSimBMVtoolCreator):
                 paths = list(Path(self.acceptance_files_dir).rglob("acceptance_*.fits"))
                 self.all_obs_ids = np.arange(len(paths))+1
             self.obs_ids = self.all_obs_ids if self.run_list.shape[0] == 0 else self.run_list
-            for iobs,obs_id in enumerate(self.obs_ids): self.bkg_output_irf_collection[iobs] = Background3D.read(f'{self.acceptance_files_dir}/acceptance_obs-{obs_id}.fits')
+            for iobs,obs_id in enumerate(self.obs_ids):
+                if self.bkg_dim == 2: self.bkg_output_irf_collection[iobs] = Background2D.read(f'{self.acceptance_files_dir}/acceptance_obs-{obs_id}.fits')
+                else: self.bkg_output_irf_collection[iobs] = Background3D.read(f'{self.acceptance_files_dir}/acceptance_obs-{obs_id}.fits')
         else:
-            self.bkg_output_irf = Background3D.read(self.single_file_path)
+            if self.bkg_dim == 2: self.bkg_output_irf = Background2D.read(self.single_file_path)
+            else: self.bkg_output_irf = Background3D.read(self.single_file_path)
     
     def get_baccmod_zenith_binning(self,
                                        observations: Observations
