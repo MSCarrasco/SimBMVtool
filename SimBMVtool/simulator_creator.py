@@ -59,7 +59,7 @@ class SimulatorCreator(BaseSimBMVtoolCreator):
                         offset_axis = self.bkg_true_irf.axes[1]
                     e_min = energy_axis.edges.min()
                     e_max = energy_axis.edges.max()
-                    offset_max = 1.2*self.size_fov_acc
+                    offset_max = np.sqrt(2)*self.size_fov_acc + 0.2 *u.deg
                     width = (offset_max.to_value(u.deg) * 2, offset_max.to_value(u.deg) * 2)
                     nbin_E_per_decade = int(np.rint(energy_axis.nbin_per_decade))
                     axis_info = e_min, e_max, nbin_E_per_decade, offset_max, width

@@ -861,7 +861,7 @@ class BMVCreator(BaseSimBMVtoolCreator):
 
         plt.show()
 
-    def plot_profile(self, irf='both', i_irf=0, profile='both', stat='sum', bias=False, ratio_lim = [0.95,1.05], all_Ebins=False, fig_save_path=''):
+    def plot_profile(self, irf='both', i_irf=0, profile='both', stat='sum', bias=False, bias_lim = [-5,5], ratio_lim = [0.95,1.05], all_Ebins=False, fig_save_path=''):
         if not self.external_data:
             if self.true_collection: bkg_true_irf = deepcopy(self.bkg_true_down_irf_collection[i_irf])
             else: bkg_true_irf = deepcopy(self.bkg_true_down_irf)
@@ -920,8 +920,8 @@ class BMVCreator(BaseSimBMVtoolCreator):
             xlabels=["FoV Lat [°]", "FoV Lon [°]"]
             if bias: suptitle += f': bias {stat} (diff/true)' 
             if (irf=='output') or (irf=='both'):
-                if self.external_data or bias: fig, (ax_lon,ax_lat) = plt.subplots(1,2,figsize=(12,(2.5/4)*6))
-                else: fig, ((ax_lon,ax_lat),(ax_lon_ratio,ax_lat_ratio)) = plt.subplots(2,2,figsize=(12,6), gridspec_kw={'height_ratios': [2.5, 1.5]})
+                if self.external_data or bias: fig, (ax_lon,ax_lat) = plt.subplots(1,2,figsize=(12,(2.5/4)*8))
+                else: fig, ((ax_lon,ax_lat),(ax_lon_ratio,ax_lat_ratio)) = plt.subplots(2,2,figsize=(12,8), gridspec_kw={'height_ratios': [2.5, 1.5]})
             if ((irf=='true') or (irf=='both')) and not bias: fig_true, (ax_lon_true,ax_lat_true) = plt.subplots(1,2,figsize=(12,(2.5/4)*6))
             for iEbin,Ebin in enumerate(np.concatenate(([-1], E_centers))):
                 if not all_Ebins and Ebin != -1: continue
@@ -939,7 +939,7 @@ class BMVCreator(BaseSimBMVtoolCreator):
                             ylabel=f'Bias {stat.capitalize()} [%]'
                             plot_condition = fov_is_in_3sig
                             if np.any(offset_edges >= r_3sig): xlim = [-offset_edges[offset_edges >= r_3sig][0],offset_edges[offset_edges >= r_3sig][0]]
-                            else: xlim = [fov_edges[0],fov_edges[-1]]
+                            else: xlim = [fov_edges[0]-2*np.diff(fov_edges)[-1],fov_edges[-1]]
                         else:
                             y_lon=profile_out.xs((Ebin), axis=1).xs(('lon_lat'),axis=1).loc[('fov_lon', stat)]
                             y_lat=profile_out.xs((Ebin), axis=1).xs(('lon_lat'),axis=1).loc[('fov_lat', stat)]
@@ -948,11 +948,16 @@ class BMVCreator(BaseSimBMVtoolCreator):
                             xlim = [fov_edges[0],fov_edges[-1]]
                         
                         if all_Ebins or (Ebin == -1):
-                            sns.lineplot(x=fov_centers[plot_condition], y=y_lon[plot_condition], ax=ax_lon, label=label, lw=lw, ls=ls_true, marker=m_lon)
-                            sns.lineplot(x=fov_centers[plot_condition], y=y_lat[plot_condition], ax=ax_lat, label=label, lw=lw, ls=ls_true, marker=m_lat)
+                            sns.lineplot(x=fov_centers[plot_condition], y=y_lon[plot_condition], ax=ax_lon, label=label, lw=lw, ls=ls_true)
+                            sns.lineplot(x=fov_centers[plot_condition], y=y_lat[plot_condition], ax=ax_lat, label=label, lw=lw, ls=ls_true)
                             
                         for iax, ax in enumerate([ax_lon,ax_lat]):
-                            ax.set(xlim=xlim,title=titles[iax],xlabel=xlabels[iax],ylabel=ylabel)
+                            if bias:
+                                ax.set(xlim=xlim, ylim=bias_lim,title=titles[iax],xlabel=xlabels[iax],ylabel=ylabel)
+                                if Ebin == E_centers[-1]:
+                                    ax.fill_between(xlim,[-2],[2], alpha=0.1, color=colors[0], label='$\pm$ 2% bias')
+                                    ax.fill_between(xlim,[-1],[1], alpha=0.1, color=colors[2], label='$\pm$ 1% bias')
+                            else: ax.set(xlim=xlim,title=titles[iax],xlabel=xlabels[iax],ylabel=ylabel)
                             ax.grid(True, alpha=0.2)
                             if not bias: ax.set(yscale='log')
 
@@ -961,12 +966,13 @@ class BMVCreator(BaseSimBMVtoolCreator):
                         y_true_lat=profile_true.xs((Ebin), axis=1).xs(('lon_lat'),axis=1).loc[('fov_lat',stat)]
                         
                         if  ((irf=='true') or (irf=='both')) and (all_Ebins or (Ebin == -1)):
-                            sns.lineplot(x=fov_centers, y=y_true_lon, ax=ax_lon_true, label=label, lw=lw, ls=ls_out, marker=m_lon)
-                            sns.lineplot(x=fov_centers, y=y_true_lat, ax=ax_lat_true, label=label, lw=lw, ls=ls_out, marker=m_lat)
+                            sns.lineplot(x=fov_centers, y=y_true_lon, ax=ax_lon_true, label=label, lw=lw, ls=ls_out)
+                            sns.lineplot(x=fov_centers, y=y_true_lat, ax=ax_lat_true, label=label, lw=lw, ls=ls_out)
 
                             for iax, ax in enumerate([ax_lon_true,ax_lat_true]):
                                 ax.set(xlim=xlim,title=titles[iax],xlabel=xlabels[iax],ylabel=ylabel)
                                 ax.grid(True, alpha=0.2)
+                                ax.legend(loc='center left')
                                 if not bias: ax.set(yscale='log')
                             fig_true.suptitle(suptitle+": true")
                             fig_true.tight_layout()
@@ -976,11 +982,12 @@ class BMVCreator(BaseSimBMVtoolCreator):
                         y_ratio_lat = y_lat/y_true_lat
 
                         if all_Ebins or (Ebin == -1):
-                            sns.lineplot(x=fov_centers[fov_is_in_3sig], y=y_ratio_lon[fov_is_in_3sig], ax=ax_lon_ratio, lw=lw, ls=ls_ratio, marker=m_lon)
-                            sns.lineplot(x=fov_centers[fov_is_in_3sig], y=y_ratio_lat[fov_is_in_3sig], ax=ax_lat_ratio, lw=lw, ls=ls_ratio, marker=m_lat)
+                            sns.lineplot(x=fov_centers[fov_is_in_3sig], y=y_ratio_lon[fov_is_in_3sig], ax=ax_lon_ratio, lw=lw, ls=ls_ratio)
+                            sns.lineplot(x=fov_centers[fov_is_in_3sig], y=y_ratio_lat[fov_is_in_3sig], ax=ax_lat_ratio, lw=lw, ls=ls_ratio)
                             for iax, ax in enumerate([ax_lon_ratio,ax_lat_ratio]):
                                 ax.set(xlim=xlim,ylim=ratio_lim,xlabel=xlabels[iax], ylabel='Ratio (out / true)')
                                 ax.grid(True, alpha=0.2)
+                                ax.legend(loc='center left')
             if not bias: suptitle += ': output'
             fig.suptitle(suptitle)
             fig.tight_layout()
@@ -1012,26 +1019,30 @@ class BMVCreator(BaseSimBMVtoolCreator):
                             ylabel=f'Bias {stat.capitalize()} [%]'
                             plot_condition = offset_is_in_3sig
                             if np.any(offset_edges >= r_3sig): xlim = [0,offset_edges[offset_edges >= r_3sig][0]]
-                            else: xlim = [0,fov_edges[-1]]
+                            else: xlim = [0-np.diff(fov_edges)[-1],fov_edges[-1]]
                         else:
                             y=profile_out.xs((Ebin), axis=1).xs(('offset'),axis=1).loc[('fov_offset', stat)]
                             ylabel=f'{stat} [events]'
                             plot_condition = y.index == y.index
-                            xlim = [0,fov_edges[-1]]
+                            xlim = [0-np.diff(fov_edges)[-1],fov_edges[-1]]
                         
                         if all_Ebins or (Ebin == -1):
-                            sns.lineplot(x=radius_centers[plot_condition], y=y[plot_condition], ax=ax, label=label, lw=lw, ls=ls_true, marker=m_lon)
-                            
-                            ax.set(xlim=xlim,title=title,xlabel=xlabel,ylabel=ylabel)
+                            sns.lineplot(x=radius_centers[plot_condition], y=y[plot_condition], ax=ax, label=label, lw=lw, ls=ls_true)
+                            if bias:
+                                ax.set(xlim=xlim, ylim=bias_lim, title=title,xlabel=xlabel,ylabel=ylabel)
+                                if Ebin == E_centers[-1]:
+                                    ax.fill_between(xlim,[-2],[2], alpha=0.1, color=colors[0], label='$\pm$ 2% bias')
+                                    ax.fill_between(xlim,[-1],[1], alpha=0.1, color=colors[2], label='$\pm$ 1% bias')
+                            else: ax.set(xlim=xlim,title=title,xlabel=xlabel,ylabel=ylabel)
                             ax.grid(True, alpha=0.2)
+                            ax.legend(loc='center left')
                             if not bias: ax.set(yscale='log')
-
                 
                     if not self.external_data and not bias:
                         y_true=profile_true.xs((Ebin), axis=1).xs(('offset'),axis=1).loc[('fov_offset',stat)]
                         
                         if  ((irf=='true') or  (irf=='both')) and  (all_Ebins or (Ebin == -1)):
-                            sns.lineplot(x=radius_centers, y=y_true, ax=ax_true, label=label, lw=lw, ls=ls_out, marker=m_lon)
+                            sns.lineplot(x=radius_centers, y=y_true, ax=ax_true, label=label, lw=lw, ls=ls_out)
 
                             ax_true.set(xlim=xlim,title=title,xlabel=xlabel,ylabel=ylabel)
                             ax_true.grid(True, alpha=0.2)
@@ -1043,7 +1054,7 @@ class BMVCreator(BaseSimBMVtoolCreator):
                         y_ratio = y/y_true
 
                         if all_Ebins or (Ebin == -1):
-                            sns.lineplot(x=radius_centers[offset_is_in_3sig], y=y_ratio[offset_is_in_3sig], ax=ax_ratio, lw=lw, ls=ls_ratio, marker=m_lon)
+                            sns.lineplot(x=radius_centers[offset_is_in_3sig], y=y_ratio[offset_is_in_3sig], ax=ax_ratio, lw=lw, ls=ls_ratio)
                             ax_ratio.set(xlim=xlim,ylim=ratio_lim,xlabel=xlabel, ylabel='Ratio (out / true)')
                             ax_ratio.grid(True, alpha=0.2)
             if not bias: suptitle += ': output'
@@ -1053,7 +1064,7 @@ class BMVCreator(BaseSimBMVtoolCreator):
             plt.show()
             if fig_save_path != '': fig.savefig(fig_save_path[:-4]+f"_offset_Ebin_{'all' if (Ebin==-1) else iEbin-1}.png", dpi=300, transparent=False, bbox_inches='tight')    
 
-    def plot_model(self, data='acceptance', irf='true', residuals='none', profile='none', downsampled=True, i_irf=0, zenith_binned=False,res_lim_for_nan = 1., title='', fig_save_path='', plot_hist=False) -> None:
+    def plot_model(self, data='acceptance', irf='true', residuals='none', profile='none', downsampled=True, i_irf=0, n_obs=1, zenith_binned=False,res_lim_for_nan = 1., title='', fig_save_path='', plot_hist=False) -> None:
         '''
         data types = ['acceptance', 'bkg_map']
         irf types = ['true', 'output', 'both']
@@ -1078,7 +1089,7 @@ class BMVCreator(BaseSimBMVtoolCreator):
                     true.data /= (i)
                 else: print(f"No model in zenith bin with mean zd = {np.rad2deg(np.arccos(i_irf)):.1f}°")
             else:
-                if self.true_collection: true = self.bkg_true_down_irf_collection[i_irf+1]
+                if self.true_collection: true = self.bkg_true_down_irf_collection[i_irf]
                 else: true = self.bkg_true_down_irf
         
         plot_out_data = (irf == 'output') or (irf == 'both')
@@ -1103,10 +1114,10 @@ class BMVCreator(BaseSimBMVtoolCreator):
             if radec_map:            
                 # By default the map is for W1 pointing
                 # TO-DO: option to chose the pointing
-                pointing, run_info = self.wobble_pointings[0], self.wobble_run_info[0]
+                pointing, run_info = self.wobble_pointings[i_irf], self.wobble_run_info[i_irf]
                 pointing_info = FixedPointingInfo(mode=PointingMode.POINTING, fixed_icrs=pointing, location=self.loc)
-                obstime=Time(self.t_ref)
-                ontime= self.livetime_simu * u.s
+                obstime = Time(self.t_ref)
+                ontime = n_obs*self.livetime_simu * u.s
 
                 if downsampled:
                     geom_irf = self.bkg_true_down_irf
@@ -1117,15 +1128,17 @@ class BMVCreator(BaseSimBMVtoolCreator):
                     oversampling=self.down_factor
                     offset_max = self.size_fov_irf
                 
-                geom=get_geom(geom_irf,None,run_info)
+                geom=get_geom(geom_irf,None,pointing)
 
                 if plot_true_data:
                     if hasattr(MapDatasetMaker(),'fov_rotation_error_limit') and ("fov_rotation_error_limit" in list(self.cfg_acceptance.keys())):
                         map_true = make_map_background_irf(pointing_info, ontime, true, geom, oversampling=oversampling, use_region_center=True, obstime=obstime, fov_rotation_error_limit=self.fov_rotation_error_limit)
                     else:
                         map_true = make_map_background_irf(pointing_info, ontime, true, geom, oversampling=oversampling, use_region_center=True, obstime=obstime)
-                    map_true_cut = map_true.cutout(position=pointing,width=2*offset_max)
-                    map_true_cut.sum_over_axes(["energy"]).plot()
+                    map_true_cut = map_true.cutout(position=pointing,width=2*self.size_fov_acc)
+                    if plot_residuals_data:
+                        map_true_cut.sum_over_axes(["energy"]).plot(add_cbar=True, stretch="linear")
+                        plt.show()
                     true = map_true.data
 
                 if plot_out_data:
@@ -1133,8 +1146,10 @@ class BMVCreator(BaseSimBMVtoolCreator):
                         map_out = make_map_background_irf(pointing_info, ontime, out, geom, oversampling=oversampling, use_region_center=True, obstime=obstime, fov_rotation_error_limit=self.fov_rotation_error_limit)
                     else:
                         map_out = make_map_background_irf(pointing_info, ontime, out, geom, oversampling=oversampling, use_region_center=True, obstime=obstime)
-                    map_out_cut = map_true.cutout(position=pointing,width=2*offset_max)
-                    map_out_cut.sum_over_axes(["energy"]).plot()
+                    map_out_cut = map_true.cutout(position=pointing,width=2*self.size_fov_acc)
+                    if plot_residuals_data: 
+                        map_out_cut.sum_over_axes(["energy"]).plot(add_cbar=True, stretch="linear")
+                        plt.show()
                     out = map_out.data
                 
                 xlabel,ylabel=("Ra offset [°]", "Dec offset [°]")
@@ -1145,7 +1160,7 @@ class BMVCreator(BaseSimBMVtoolCreator):
                 if plot_true_data: true = true.data
                 if plot_out_data: out = out.data
             
-            res_type_label = " diff / true" if residuals == "diff/true" else "diff / $\sqrt{true}$"
+            res_type_label = "diff / true [%]" if residuals == "diff/true" else "diff / $\sqrt{true}$"
 
             rot = 65
             nncols = 3
@@ -1155,14 +1170,34 @@ class BMVCreator(BaseSimBMVtoolCreator):
             width = 16
             cfraction = 0.15
 
-            if plot_residuals_data: self.res_arr = compute_residuals(out, true, residuals=residuals,res_lim_for_nan=0.9)
+            if plot_residuals_data:
+                self.res_arr = compute_residuals(out, true, residuals=residuals,res_lim_for_nan=res_lim_for_nan)
+                if radec_map:
+                    fig,ax=plt.subplots(figsize=(6,6))
+                    map_out.data = deepcopy(self.res_arr)
+                    map_res_cut = map_out.cutout(position=pointing,width=2*offset_max).sum_over_axes(["energy"])
+                    
+                    res_label = res_type_label
+                    res = map_res_cut.data[0]
+                    if residuals=='diff/true': res *= 100
+                    vlim = np.nanmax(np.abs(res))
+                    colorbarticks = np.concatenate((np.flip(-np.logspace(-1,3,5)),[0],np.logspace(-1,3,5)))
+                    heatmap = ax.imshow(res, origin='lower', norm=SymLogNorm(linthresh=0.03, linscale=0.03, vmin=-vlim, vmax=vlim), cmap='coolwarm')
+                    plt.colorbar(heatmap,ax=ax, shrink=0.75, ticks=colorbarticks, label=res_label)
+                    x_lim = ax.get_xlim()
+                    xticks_new = scale_value(fov_bin_edges,fov_lim,x_lim).round(1)
+                    ax.set_xticks(rotation=rot, ticks=xticks_new, labels=np.flip(fov_bin_edges.round(1)))
+                    ax.set_yticks(ticks=xticks_new, labels=fov_bin_edges.round(1))
+                    ax.set(title='Background map residuals',xlabel=xlabel,ylabel=ylabel)
+                    plt.tight_layout()
+                    plt.show()
 
             fig, axs = plt.subplots(nrows=rows, ncols=cols, figsize=(width, rows * width // (cols * (1 + cfraction))))
             for iax, ax in enumerate(axs.flat[:n]):
                 if plot_residuals_data:
-                    res_label = f'{res_type_label} [%]'
-                    res = self.res_arr[iax,:,:]
-                    res *= 100
+                    res_label = res_type_label
+                    res = deepcopy(self.res_arr[iax,:,:])
+                    if residuals=='diff/true': res *= 100
                     vlim = np.nanmax(np.abs(res))
                     colorbarticks = np.concatenate((np.flip(-np.logspace(-1,3,5)),[0],np.logspace(-1,3,5)))
                     heatmap = ax.imshow(res, origin='lower', norm=SymLogNorm(linthresh=0.03, linscale=0.03, vmin=-vlim, vmax=vlim), cmap='coolwarm')
@@ -1191,39 +1226,13 @@ class BMVCreator(BaseSimBMVtoolCreator):
             if plot_residuals_data: 
                 if plot_hist:
                     fig_hist, ax_hist = plt.subplots(figsize=(8,5))
-                    res_arr_flat = np.array(self.res_arr).flatten()
-                    res_arr_flat = res_arr_flat[~np.isnan(res_arr_flat)]
-                    if len(res_arr_flat) >= 20: normal_stat = normaltest(res_arr_flat)
-                    else: normal_stat = shapiro(res_arr_flat)
-                    res_arr_flat_absmax = np.max(np.abs(res_arr_flat))
-                    sns.histplot(res_arr_flat, bins=np.linspace(-res_arr_flat_absmax,res_arr_flat_absmax,15), label=f"All ({normal_stat.pvalue:.2e})", ax=ax_hist, element='step', fill=False, multiple='layer')
                     for iEbin in range(n):
-                        res_arr_flat = np.array(self.res_arr[iEbin,:,:]).flatten()
+                        res_arr_flat = deepcopy(np.array(self.res_arr[iEbin,:,:]).flatten())
                         res_arr_flat = res_arr_flat[~np.isnan(res_arr_flat)]
-                        if len(res_arr_flat) >= 20: normal_stat = normaltest(res_arr_flat)
-                        else: normal_stat = shapiro(res_arr_flat)
                         res_arr_flat_absmax = np.max(np.abs(res_arr_flat))
-                        sns.histplot(res_arr_flat, bins=np.linspace(-res_arr_flat_absmax,res_arr_flat_absmax,15), label=self.Ebin_labels[iEbin][:-3]+f"({normal_stat.pvalue:.2e})", ax=ax_hist, element='step', fill=False, multiple='layer')
+                        sns.histplot(res_arr_flat, bins=np.linspace(-res_arr_flat_absmax,res_arr_flat_absmax,11), label=self.Ebin_labels[iEbin][:-3], ax=ax_hist, element='step', fill=False, multiple='layer')
                     ax_hist.set(title=f'{title} distribution', xlabel=res_label, yscale='log')
-                    ax_hist.legend(title='E bin (p-value)', bbox_to_anchor=(1,1))
-                    # fig_hist, ax_hist = plt.subplots(figsize=(4,3))
-                    # res_arr_flat = np.array(self.res_arr).flatten()
-                    # res_arr_flat = res_arr_flat[~np.isnan(res_arr_flat)]
-                    # res_arr_flat_absmax = np.max(np.abs(res_arr_flat))
-                    # sns.histplot(res_arr_flat, bins=np.linspace(-res_arr_flat_absmax,res_arr_flat_absmax,20), ax=ax_hist, element='step', fill=False, stat='density', color='k',line_kws={'color':'k'})
-                    # ax_hist.set(title=f'{title} distribution', xlabel=res_label, yscale='log')
-                    # # Define the text content and position it on the right
-                    # textstr = '\n'.join((
-                    #     r'$\mu=%.2f$' % (np.nanmean(res_arr_flat), ),
-                    #     r'$\mathrm{median}=%.2f$' % (np.nanmedian(res_arr_flat), ),
-                    #     r'$\sigma=%.2f$' % (np.nanstd(res_arr_flat), ),
-                    #     f'sum= {np.sum(res_arr_flat):.2f}'
-                    # ))
-
-                    # # Add the text box on the right of the plot
-                    # props = dict(boxstyle='round', facecolor='w', alpha=0.5)
-                    # ax_hist.text(1.05, 0.8, textstr, transform=ax_hist.transAxes,
-                    #             fontsize=10, verticalalignment='center', bbox=props)
+                    ax_hist.legend(title='Energy bin', bbox_to_anchor=(1,1))
                     plt.show()
                     if fig_save_path != '': fig.savefig(fig_save_path[:-4]+'_distrib.png', dpi=300, transparent=False, bbox_inches='tight')
         else: print("No data to plot")
@@ -1662,35 +1671,42 @@ class BMVCreator(BaseSimBMVtoolCreator):
                 result = fit.run(datasets=[stacked])
 
                 best_models = stacked.models.copy()
-                minuit = result.optimize_result.minuit
+                try:
+                    minuit = result.optimize_result.minuit
 
-                print(minuit)
-                print(result)
+                    print(minuit)
+                    print(result)
 
-                display(models_stacked.to_parameters_table())
-                
-                results[model_name]["stacked"]={
-                        "fit_result" : result,
-                        "models" : models_stacked.copy()
-                    }
-                
-                for component in models_stacked[:-1]:
-                    region = CircleSkyRegion(component.spatial_model.position, radius=size_roi)
-                    stacked.plot_residuals(
-                        kwargs_spatial=dict(method="diff/sqrt(model)", vmin=-0.5, vmax=0.5),
-                        kwargs_spectral=dict(region=region),
-                    )
-                    plt.show()
-
-                    fpe = FluxPointsEstimator(
-                    energy_edges=energy_axis.edges, source=component.name, selection_optional="all"
-                    )
-                    flux_points_stacked = fpe.run(datasets=stacked)
+                    display(models_stacked.to_parameters_table())
                     
-                    results[model_name]["stacked"][component.name]= {
-                        "model" : component.copy(),
-                        "flux_points" : flux_points_stacked
-                    }
+                    results[model_name]["stacked"]={
+                            "fit_success" : True,
+                            "fit_result" : result,
+                            "models" : models_stacked.copy()
+                        }
+                    
+                    for component in models_stacked[:-1]:
+                        region = CircleSkyRegion(component.spatial_model.position, radius=size_roi)
+                        stacked.plot_residuals(
+                            kwargs_spatial=dict(method="diff/sqrt(model)", vmin=-0.5, vmax=0.5),
+                            kwargs_spectral=dict(region=region),
+                        )
+                        plt.show()
+
+                        fpe = FluxPointsEstimator(
+                        energy_edges=energy_axis.edges, source=component.name, selection_optional="all"
+                        )
+                        flux_points_stacked = fpe.run(datasets=stacked)
+                        
+                        results[model_name]["stacked"][component.name]= {
+                            "model" : component.copy(),
+                            "flux_points" : flux_points_stacked
+                        }
+                except:
+                    results[model_name]["stacked"]={
+                            "fit_success" : False
+                        }
+
 
             if (fit_method == 'joint') or (fit_method == 'both'):
                 unstacked_with_bkg_model = self.get_dataset(bkg_method=bkg_method, unstacked_datasets="stored",  bkg_on_stacked_dataset=False, return_stacked=False)

@@ -271,27 +271,31 @@ class BaseSimBMVtoolCreator(ABC):
             self.bkg_true_irf_collection = {}
             self.bkg_true_down_irf_collection = {}
             tmp_config = self.config
-            for i_step in range(self.n_run):
+            n_run_per_wobble = self.cfg_simulation["n_run"]
+            n_third = n_run_per_wobble // 3
+            for i_step in range(n_run_per_wobble):
+                if i_step < n_third: n_step = 0
+                else: n_step = 0.5 if i_step < 2*n_third else 1
                 if self.lon_grad !=0:
-                    self.lon_grad_step = np.diff(np.linspace(0,abs(self.lon_grad), self.n_run))[0]
-                    lon_grad_new = i_step * self.lon_grad_step
+                    self.lon_grad_step = np.diff(np.linspace(0,abs(self.lon_grad), round(n_run_per_wobble)))[0]
+                    lon_grad_new = np.round(n_step * n_run_per_wobble * self.lon_grad_step,1)
                     for param in tmp_config['background']['custom_source']['spatial']['parameters']:
                         if param['name'] == 'lon_grad':
                             param['value'] = lon_grad_new
                 if self.lat_grad !=0:
-                    self.lat_grad_step = np.diff(np.linspace(0,abs(self.lat_grad), self.n_run))[0]
-                    lat_grad_new = i_step * self.lat_grad_step
+                    self.lat_grad_step = np.diff(np.linspace(0,abs(self.lat_grad), round(n_run_per_wobble)))[0]
+                    lat_grad_new = np.round(n_step * n_run_per_wobble * self.lat_grad_step,1)
                     for param in tmp_config['background']['custom_source']['spatial']['parameters']:
                         if param['name'] == 'lat_grad':
                             param['value'] = lat_grad_new
 
-                if (i_step == 0) or  (i_step == self.n_run-1): plot,verbose=(False,True)
+                if (i_step == 0) or  (i_step == n_run_per_wobble-1): plot,verbose=(False,True)
                 else: plot,verbose=(False,False)
 
                 bkg_true_irf, bkg_true_down_irf = get_bkg_true_irf_from_config(tmp_config,downsample=True,downsample_only=False,plot=plot,verbose=verbose)
                 for i_wobble in range(len(self.wobble_pointings)):
-                    self.bkg_true_irf_collection[i_step + i_wobble*self.n_run] = bkg_true_irf
-                    self.bkg_true_down_irf_collection[i_step + i_wobble*self.n_run] = bkg_true_down_irf
+                    self.bkg_true_irf_collection[i_step + i_wobble*n_run_per_wobble] = bkg_true_irf
+                    self.bkg_true_down_irf_collection[i_step + i_wobble*n_run_per_wobble] = bkg_true_down_irf
         else:
             self.bkg_true_irf, self.bkg_true_down_irf = get_bkg_true_irf_from_config(self.config,downsample=True,downsample_only=False,plot=False,verbose=True)
             

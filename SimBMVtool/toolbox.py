@@ -131,17 +131,30 @@ def get_obs_collection(dir_path,pattern,multiple_simulation_subdir=False,from_in
     paths = sorted(list(path.rglob(pattern)))
     obs_ids = None if (obs_ids.shape[0]==0) else obs_ids
     if not multiple_simulation_subdir:
-        data_store = get_data_store(dir_path=dir_path, pattern=pattern, from_index=from_index)
+        if not from_index:
+            try: data_store = get_data_store(dir_path, '', from_index=True)
+            except: data_store = get_data_store(dir_path=dir_path, pattern=pattern, from_index=from_index)
+        else:  data_store = get_data_store(dir_path=dir_path, pattern=pattern, from_index=from_index)
         obs_collection = data_store.get_observations(obs_id=obs_ids, required_irf=['aeff','edisp'])
-        if obs_collection[0].aeff is None:
-            irf_files = data_store.obs_table['IRF_FILENAME'].astype(str).data
-            if obs_ids is None: obs_ids = np.array(data_store.obs_table['OBS_ID'].data)
-            for iobs, obs_id in enumerate(obs_ids):
-                irf_dict = load_irf_dict_from_file(str(irf_files[0]))
+        
+        # Because DL3s from different experiments can have different names for hdus we need to check if some which are missing can be retrieved
+        file_dirs = data_store.hdu_table['FILE_DIR'].astype(str).data
+        for irf_filename in ['IRF_FILENAME','FILE_NAME']:
+            if irf_filename in data_store.obs_table.columns:
+                irf_files = data_store.obs_table[irf_filename].astype(str).data
+                break
+            elif irf_filename in data_store.hdu_table.columns:
+                irf_files = data_store.hdu_table[irf_filename].astype(str).data
+                break
+        if obs_ids is None: obs_ids = np.array(data_store.obs_table['OBS_ID'].data)
+        for iobs, obs_id in enumerate(obs_ids):
+            if (obs_collection[iobs].aeff is None) or (obs_collection[iobs].edisp is None) or (obs_collection[iobs].psf is None) or (obs_collection[iobs].bkg is None) or (obs_collection[iobs].gti is None):
+                irf_dict = load_irf_dict_from_file(dir_path+'/'+str(irf_files[iobs]))
                 if (obs_collection[iobs].aeff is None) & ('aeff' in irf_dict): obs_collection[iobs].aeff = irf_dict['aeff']
                 if (obs_collection[iobs].edisp is None) & ('edisp' in irf_dict): obs_collection[iobs].edisp = irf_dict['edisp']
                 if (obs_collection[iobs].psf is None) & ('psf' in irf_dict): obs_collection[iobs].psf = irf_dict['psf']
                 if (obs_collection[iobs].bkg is None) & ('bkg' in irf_dict): obs_collection[iobs].bkg = irf_dict['bkg']
+                if (obs_collection[iobs].gti is None) & ('gti' in irf_dict): obs_collection[iobs].bkg = irf_dict['gti']
     else:
         # This handles the case where multiple observations have the same obs_id
         obs_collection = Observations()
