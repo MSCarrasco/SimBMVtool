@@ -91,7 +91,7 @@ class BMVCreator(BaseSimBMVtoolCreator):
         region_shape = self.region_shape if self.region_shape != "n_circles" else f"{self.n_circles}_circle{'s'*(self.n_circles > 1)}"
         self.end_name=f'{self.bkg_dim}D_{region_shape}_Ebins_{self.nbin_E_acc}_offsetbins_{self.nbin_offset_acc}_offset_max_{self.size_fov_acc.value:.1f}'+f'_{self.cos_zenith_binning_parameter_value}sperW'*self.zenith_binning+f'_exclurad_{self.exclu_rad}'*((self.exclu_rad != 0) & (self.region_shape != 'noexclusion'))
         self.index_suffix = f"_with_bkg_{self.bkg_dim}d_{self.method}_{self.end_name[3:]}"
-        self.acceptance_files_dir = f"{self.output_dir}/{self.subdir}/{self.method}/acceptances"
+        self.acceptance_files_dir = f"{self.output_dir}/{self.subdir}/{self.method}/acceptances/{self.end_name}"
         self.plots_dir=f"{self.output_dir}/{self.subdir}/{self.method}/plots"
         self.data_dir=f"{self.output_dir}/{self.subdir}/{self.method}/data"
         Path(self.acceptance_files_dir).mkdir(parents=True, exist_ok=True)
@@ -267,22 +267,32 @@ class BMVCreator(BaseSimBMVtoolCreator):
             self.init_config_bmv(config_path)
         else: ValueError("Config file needed")
     
-    def load_output_background_irfs(self, config_path=None) -> None:
+    def load_output_background_irfs(self, as_true=False, path_acceptance_dir='stored', config_path=None) -> None:
         if config_path is not None: self.init_config(config_path)
-
         if self.out_collection:
-            self.bkg_output_irf_collection = {}
-
+            irf_collection = {}
+            if path_acceptance_dir=='stored': path_acceptance_dir = self.acceptance_files_dir
             if (self.all_obs_ids.size == 0) and not self.external_data:
-                paths = list(Path(self.acceptance_files_dir).rglob("acceptance_*.fits"))
+                paths = list(Path(path_acceptance_dir).rglob("acceptance_*.fits"))
                 self.all_obs_ids = np.arange(len(paths))+1
             self.obs_ids = self.all_obs_ids if self.run_list.shape[0] == 0 else self.run_list
+            
             for iobs,obs_id in enumerate(self.obs_ids):
-                if self.bkg_dim == 2: self.bkg_output_irf_collection[iobs] = Background2D.read(f'{self.acceptance_files_dir}/acceptance_obs-{obs_id}.fits')
-                else: self.bkg_output_irf_collection[iobs] = Background3D.read(f'{self.acceptance_files_dir}/acceptance_obs-{obs_id}.fits')
+                if self.bkg_dim == 2: irf_collection[iobs] = Background2D.read(f'{path_acceptance_dir}/acceptance_obs-{obs_id}.fits')
+                else: irf_collection[iobs] = Background3D.read(f'{path_acceptance_dir}/acceptance_obs-{obs_id}.fits')
+            if as_true:
+                self.bkg_true_irf_collection = irf_collection
+                self.bkg_true_down_irf_collection = irf_collection
+                self.true_collection = True
+            else: self.bkg_output_irf_collection = irf_collection
         else:
-            if self.bkg_dim == 2: self.bkg_output_irf = Background2D.read(self.single_file_path)
-            else: self.bkg_output_irf = Background3D.read(self.single_file_path)
+            if self.bkg_dim == 2: irf = Background2D.read(self.single_file_path)
+            else: irf = Background3D.read(self.single_file_path)
+            if as_true:
+                self.bkg_true_irf = irf
+                self.bkg_true_down_irf = irf
+                self.true_collection = True
+            else: self.bkg_output_irf = irf
     
     def get_baccmod_zenith_binning(self,
                                        observations: Observations
@@ -1087,6 +1097,7 @@ class BMVCreator(BaseSimBMVtoolCreator):
                 if plot_true_data:
                     zenith_binned_models = self.zenith_binned_bkg_true_down_irf_collection[i_irf]
                     for i, model in enumerate(zenith_binned_models):
+                        if isinstance(model, Background2D): model = model.to_3d()
                         if i==0: true = zenith_binned_models[0]
                         else: true.data += model.data
                     true.data /= (i)
@@ -1094,6 +1105,7 @@ class BMVCreator(BaseSimBMVtoolCreator):
             else:
                 if self.true_collection: true = self.bkg_true_down_irf_collection[i_irf]
                 else: true = self.bkg_true_down_irf
+                if isinstance(true, Background2D): true = true.to_3d()
         
         plot_out_data = (irf == 'output') or (irf == 'both')
         if plot_out_data: 
@@ -1102,13 +1114,15 @@ class BMVCreator(BaseSimBMVtoolCreator):
                 if plot_out_data:
                     zenith_binned_models = self.zenith_binned_bkg_output_irf_collection[i_irf]
                     for i, model in enumerate(zenith_binned_models):
-                        if i==0: out = zenith_binned_models[0]
+                        if isinstance(model, Background2D): model = model.to_3d()
+                        if i==0: out = deepcopy(model)
                         else: out.data += model.data
                     out.data /= (i)
                 else: print(f"No model in zenith bin with mean zd = {np.rad2deg(np.arccos(i_irf)):.1f}°")
             else:
                 if self.out_collection: out = self.bkg_output_irf_collection[i_irf]
                 else: out = self.bkg_output_irf
+                if isinstance(out, Background2D): out = out.to_3d()
         
         plot_residuals_data = (residuals != "none") & (plot_true_data+plot_out_data == 2)
         
