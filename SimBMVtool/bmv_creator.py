@@ -814,9 +814,9 @@ class BMVCreator(BaseSimBMVtoolCreator):
         self.dfprofile = dfprofile.sort_index()
         return self.dfprofile
     
-    def plot_offset_residuals_pvalue(self, dfprofile=None):
+    def plot_offset_residuals_pvalue(self, i_irf=0, dfprofile=None):
         if dfprofile is None: dfprofile = self.dfprofile
-        if self.true_collection: bkg_true_irf = deepcopy(self.bkg_true_down_irf_collection[1])
+        if self.true_collection: bkg_true_irf = deepcopy(self.bkg_true_down_irf_collection[i_irf])
         else: bkg_true_irf = deepcopy(self.bkg_true_down_irf)
         fov_edges = bkg_true_irf.axes['fov_lon'].edges.value
         fov_centers = bkg_true_irf.axes['fov_lon'].center.value
