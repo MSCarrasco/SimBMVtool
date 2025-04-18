@@ -875,7 +875,7 @@ class BMVCreator(BaseSimBMVtoolCreator):
         plt.show()
 
     def plot_profile(self, irf='both', i_irf=0, profile='both', stat='sum', bias=False, bias_lim = [-5,5], ratio_lim = [0.95,1.05], all_Ebins=False, fig_save_path=''):
-        if not self.external_data:
+        if hasattr(self, 'bkg_true_down_irf_collection') or hasattr(self, 'bkg_true_down_irf'):
             if self.true_collection: bkg_true_irf = deepcopy(self.bkg_true_down_irf_collection[i_irf])
             else: bkg_true_irf = deepcopy(self.bkg_true_down_irf)
             
