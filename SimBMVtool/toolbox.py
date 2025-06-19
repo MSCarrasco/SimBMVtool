@@ -8,7 +8,7 @@ from astropy.coordinates import SkyCoord,EarthLocation, angular_separation, posi
 from astropy.time import Time
 from astropy.visualization.wcsaxes import SphericalCircle
 import matplotlib.pyplot as plt
-from matplotlib.colors import CenteredNorm
+from matplotlib.colors import CenteredNorm, LinearSegmentedColormap
 
 from copy import deepcopy
 import pandas as pd
@@ -20,7 +20,6 @@ from itertools import product
 
 # %matplotlib inline
 
-from IPython.display import display
 from gammapy.data import FixedPointingInfo, Observations, Observation, PointingMode, ObservationTable
 from gammapy.datasets import MapDataset, MapDatasetOnOff
 from gammapy.irf import load_irf_dict_from_file, Background2D, Background3D, FoVAlignment
@@ -28,7 +27,7 @@ from gammapy.makers import MapDatasetMaker
 from gammapy.maps import MapAxis, WcsGeom, WcsNDMap
 from regions import CircleAnnulusSkyRegion, CircleSkyRegion, Regions
 from gammapy.estimators import ExcessMapEstimator, TSMapEstimator
-
+from gammapy.maps.region.geom import RegionGeom
 from gammapy.data import DataStore
 
 from gammapy.modeling import Fit,Parameter
@@ -421,7 +420,7 @@ def get_exclusion_mask_from_dataset_geom(dataset, exclude_regions):
 def get_lima_maps(stacked_dataset, correlation_radius, correlate_off, estimator='excess', model_source=None):
     if estimator=='excess': map_estimator = ExcessMapEstimator(correlation_radius*u.deg, correlate_off=correlate_off)
     elif estimator=='ts':
-        if isinstance(stacked_dataset, MapDatasetOnOff): stacked_dataset = stacked_dataset.to_map_dataset()
+        # if isinstance(stacked_dataset, MapDatasetOnOff): stacked_dataset = stacked_dataset.to_map_dataset()
         map_estimator = TSMapEstimator(
                                         model_source,
                                         kernel_width=correlation_radius * u.deg,
@@ -491,11 +490,11 @@ def plot_skymap_from_dict(skymaps, key, crop_width=0 * u.deg, ring_bkg_param=Non
             'title': 'Background map'
         },
         'significance_all': {
-            'cbar_label': 'significance [$\sigma$]',
+            'cbar_label': 'significance [$\sigma = \sqrt{TS}$]',
             'title': 'Significance map'
         },
         'significance_off': {
-            'cbar_label': 'significance [$\sigma$]',
+            'cbar_label': 'significance [$\sigma = \sqrt{TS}$]',
             'title': 'Off significance map'
         },
         'excess': {
@@ -522,22 +521,29 @@ def plot_skymap_from_dict(skymaps, key, crop_width=0 * u.deg, ring_bkg_param=Non
     cbar_label, title = (skymaps_args[key]["cbar_label"], skymaps_args[key]["title"])
     
     fig,ax=plt.subplots(figsize=figsize,subplot_kw={"projection": skymap.geom.wcs})
-    if key in ['counts', 'background']: skymap.plot(ax=ax, add_cbar=True, stretch="linear")
-    elif key in ['excess', 'ts', 'flux']: skymap.plot(ax=ax, add_cbar=True, stretch="linear", cmap='magma')
+    if key in ['counts', 'background']:
+        skymap.plot(ax=ax, add_cbar=False, stretch="linear")
+        im = ax.images[-1]
+        cax = fig.add_axes([ax.get_position().x1+0.05,ax.get_position().y0,0.04,ax.get_position().height])
+        plt.colorbar(im, cax=cax, label=cbar_label) # Similar to fig.colorbar(im, cax = cax)
+    elif key in ['excess', 'ts', 'flux']:
+        skymap.plot(ax=ax, add_cbar=False, stretch="linear", cmap='magma')
+        im = ax.images[-1]
+        cax = fig.add_axes([ax.get_position().x1+0.05,ax.get_position().y0,0.04,ax.get_position().height])
+        plt.colorbar(im, cax=cax, label=cbar_label) # Similar to fig.colorbar(im, cax = cax)
     elif 'significance' in key: 
-        skymap.plot(ax=ax, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma')
+        skymap.plot(ax=ax, add_cbar=False, stretch="linear",norm=CenteredNorm(), cmap='magma')
+        im = ax.images[-1]
+        cax = fig.add_axes([ax.get_position().x1+0.05,ax.get_position().y0,0.04,ax.get_position().height])
+        plt.colorbar(im, cax=cax, label=cbar_label) # Similar to fig.colorbar(im, cax = cax)
         ax.contour(skymap.data[0], levels=[3,5], colors=['white', 'red'], alpha=0.5)
         maxsig = np.nanmax(skymap.data)
         minsig = np.nanmin(skymap.data)
-        im = ax.images
-        cb = im[-1].colorbar
-        cb.ax.axhline(maxsig, c='g')
-        cb.ax.text(1.1,maxsig - 0.07,' max', color = 'g')
-        cb.ax.axhline(minsig, c='g')
-        cb.ax.text(1.1,minsig - 0.07,' min', color = 'g')
-    im = ax.images
-    cb = im[-1].colorbar 
-    cb.ax.set_ylabel(cbar_label)
+        cax.axhline(maxsig, c='g')
+        cax.text(1.1,maxsig - 0.07,' max', color = 'g')
+        cax.axhline(minsig, c='g')
+        cax.text(1.1,minsig - 0.07,' min', color = 'g')
+        
     if (ring_bkg_param is not None):
             if hasattr(ring_bkg_param,'__len__') & (len(ring_bkg_param)==2):
                 int_rad, width = ring_bkg_param
@@ -653,23 +659,185 @@ def compute_residuals(out, true, residuals='diff/true',res_lim_for_nan=1.) -> np
         res_arr[iEbin,:,:] += res
     return res_arr
 
-def get_nested_model_wilk_significance(fitted_null_model, fitted_alternative_model):
-    D = fitted_null_model.total_stat - fitted_alternative_model.total_stat
-    null_free_parameters = pd.Series(fitted_null_model.parameters.free_parameters.to_table()['name'])
-    alt_free_parameters = pd.Series(fitted_alternative_model.parameters.free_parameters.to_table()['name'])
-    is_nested = null_free_parameters.isin(alt_free_parameters).all()
-    if is_nested:
-        delta_dof = len(alt_free_parameters) - len(null_free_parameters)
-
-        if delta_dof == 1: return np.sqrt(D) if D > 0 else np.sqrt(-D)
-        else:
-            p_value = chi2.sf(D, delta_dof)
-            return np.sqrt(2) * (erfcinv(p_value) if p_value < 1e-4 else erfinv(1-p_value))
-    else: return 0
-
 #-------------------------------------------------------------------------------------
 # High level analysis
 #-------------------------------------------------------------------------------------
+
+def sigma_to_ts(sigma, df=1):
+    """Convert sigma to delta ts"""
+    p_value = 2 * norm_stats.sf(sigma)
+    return chi2.isf(p_value, df=df)
+
+def ts_to_sigma(ts, df=1):
+    """Convert delta ts to sigma"""
+    p_value = chi2.sf(ts, df=df)
+    return norm_stats.isf(0.5 * p_value)
+
+def is_nested_model(null,alt):
+    null_free_params = pd.Series(null.parameters.free_parameters.to_table()['name'])
+    alt_free_params = pd.Series(alt.parameters.free_parameters.to_table()['name'])
+    if 'alpha' in null_free_params.values: null_free_params.loc[null_free_params == 'alpha'] = 'index'
+    if 'alpha' in alt_free_params.values: alt_free_params.loc[alt_free_params == 'alpha'] = 'index'
+    return null_free_params.isin(alt_free_params).all()
+
+def get_nested_model_wilk_significance(fitted_null_model, fitted_alternative_model, return_dof=True):
+    D = fitted_null_model.total_stat - fitted_alternative_model.total_stat
+    null_free_parameters = pd.Series(fitted_null_model.parameters.free_parameters.to_table()['name'])
+    alt_free_parameters = pd.Series(fitted_alternative_model.parameters.free_parameters.to_table()['name'])
+    is_nested = is_nested_model(fitted_null_model, fitted_alternative_model)
+    if is_nested:
+        delta_dof = len(alt_free_parameters) - len(null_free_parameters)
+        wilk_sig = ts_to_sigma(D, delta_dof)
+        if return_dof: return wilk_sig, delta_dof
+        else: return wilk_sig
+    else:
+        if return_dof: return -1, -1
+        else: return -1
+
+def get_dfmodels_wilk(results:dict, bkg_method='ring', fit_method='stacked'):
+    models_list = list(results[bkg_method]['results'].keys())
+    dfmodels_0 = pd.DataFrame(index=pd.Index(models_list, name='null_model'), columns=pd.Index(models_list, name='alt_model'))
+    dfmodels_wilk = dfmodels_0.copy()
+
+    for null_model, alt_model in product(models_list, models_list):
+        fitted_null = results[bkg_method]['results'][null_model][fit_method]
+        fitted_alt = results[bkg_method]['results'][alt_model][fit_method]
+        fit_fail = (("fit_success" in fitted_null.keys()) and not fitted_null["fit_success"]) or (("fit_success" in fitted_alt.keys()) and not fitted_alt["fit_success"])
+        if fit_fail:
+            dfmodels_wilk.loc[null_model, alt_model] = -1
+            continue
+        
+        null_tail, null_head = null_model.split(' - ')
+        alt_tail, alt_head = alt_model.split(' - ')
+
+        if null_head == 'No source': is_nested_head = True
+        elif alt_head == 'No source': is_nested_head = False
+        else:
+            is_nested_head = is_nested_model(fitted_null['models'][null_head + ' head'],fitted_alt['models'][alt_head + ' head'])
+        
+        if null_tail == 'No source': is_nested_tail = True
+        elif alt_tail == 'No source': is_nested_tail = False
+        else:
+            is_nested_tail = is_nested_model(fitted_null['models'][null_tail + ' tail'],fitted_alt['models'][alt_tail + ' tail'])
+
+        if is_nested_head and is_nested_tail:
+            dfmodels_wilk.loc[null_model, alt_model] = get_nested_model_wilk_significance(fitted_null['fit_result'], fitted_alt['fit_result'])
+    return dfmodels_wilk
+
+def get_dfmodels_wilk_dof(results:dict, bkg_method='ring', fit_method='stacked'):
+    models_list = list(results[bkg_method]['results'].keys())
+    dfmodels_0 = pd.DataFrame(index=pd.Index(models_list, name='null_model'), columns=pd.MultiIndex.from_product([["wilk","delta_dof"],models_list], names=['stat','alt_model']))
+    dfmodels_wilk_dof = dfmodels_0.copy()
+
+    for null_model, alt_model in product(models_list, models_list):
+        fitted_null = results[bkg_method]['results'][null_model][fit_method]
+        fitted_alt = results[bkg_method]['results'][alt_model][fit_method]
+        fit_fail = (("fit_success" in fitted_null.keys()) and not fitted_null["fit_success"]) or (("fit_success" in fitted_alt.keys()) and not fitted_alt["fit_success"])
+        if fit_fail:
+            dfmodels_wilk_dof.loc[null_model, ("wilk", alt_model)] = -1
+            continue
+        null_tail, null_head = null_model.split(' - ')[:2]
+        alt_tail, alt_head = alt_model.split(' - ')[:2]
+
+        if null_head == 'No source': is_nested_head = True
+        elif alt_head == 'No source': is_nested_head = False
+        else:
+            is_nested_head = is_nested_model(fitted_null['models'][null_head + ' head'],fitted_alt['models'][alt_head + ' head'])
+        
+        if null_tail == 'No source': is_nested_tail = True
+        elif alt_tail == 'No source': is_nested_tail = False
+        else:
+            is_nested_tail = is_nested_model(fitted_null['models'][null_tail + ' tail'],fitted_alt['models'][alt_tail + ' tail'])
+
+        if is_nested_head and is_nested_tail:
+            if 'PSR' in null_model:
+                is_nested_psr = True if 'PSR' in alt_model else False
+                if not is_nested_psr: continue
+            wilk_sig, delta_dof = get_nested_model_wilk_significance(fitted_null['fit_result'], fitted_alt['fit_result'])
+            dfmodels_wilk_dof.loc[null_model,  ("wilk", alt_model)] = wilk_sig
+            dfmodels_wilk_dof.loc[null_model,  ("delta_dof", alt_model)] = delta_dof
+    return dfmodels_wilk_dof
+
+def plot_dfmodels_wilk(dfmodels_wilk:pd.DataFrame, fontsize=15, rotation=45, figsize = (20,20), fig_ax=(None,None), shrink=0.7, labels=["","",""], annot=True, square=False):
+    title, xlabel, ylabel = labels
+    if fig_ax == (None,None): fig,ax = plt.subplots(figsize=figsize)
+    else: fig, ax = fig_ax
+    dfplot = dfmodels_wilk.where(dfmodels_wilk >= 0, np.nan).copy()
+    c = ["darkred","red","lightcoral", "gold", "yellow", "palegreen", "lightgreen","green","darkgreen"]
+    vmax=dfplot.max().max()
+    v3sig = 3./vmax
+    v5sig = 5./vmax
+    v = [0, v3sig-0.5*v3sig, v3sig-0.001*v3sig, v3sig, v3sig+0.999*(v5sig-v3sig), v5sig, v5sig+0.33*(1-v5sig), v5sig+0.66*(1-v5sig),1.]
+    l = list(zip(v,c))
+    cmap=LinearSegmentedColormap.from_list('rg',l, N=256*2)
+    sns.heatmap(dfplot.T.astype(float), annot=annot,annot_kws={'fontweight':'bold','fontsize':fontsize-2}, cbar=True, vmin=0, vmax=vmax,cmap=cmap, square=square, mask=dfplot.T.isna(),cbar_kws={"shrink": shrink, 'label': "significance [$\sigma$]"},ax=ax)
+
+    ax.invert_yaxis()
+    ax.set_xlabel(f"Null model" if xlabel == "" else xlabel, fontsize=fontsize)
+    ax.set_ylabel(f"Alternative model" if ylabel == "" else ylabel, fontsize=fontsize)
+    xticks = ax.get_xticklabels()
+    yticks = ax.get_yticklabels()
+    ax.set_xticklabels(xticks, rotation=rotation, fontsize=fontsize-3, ha='right')
+    ax.set_yticklabels(yticks, rotation=0, fontsize=fontsize-3, ha='right')
+    ax.grid(True, alpha=0.1)
+    ax.set_title(label="Wilk significance matrix\n" if title == "" else title, fontsize=fontsize+2)
+    plt.tight_layout()
+    plt.show()
+
+def get_dfbest_models(dfmodels_wilk:pd.DataFrame, results:dict, bkg_method='ring', fit_method='stacked', rel_L_tsh=1, sig_method='wilk'):
+    models_list = list(results[bkg_method]['results'].keys())
+    dfmodels = pd.DataFrame(index=pd.Index(models_list,name='model'))
+    models_to_remove = []
+    for tested_model in models_list:
+        fitted_model = results[bkg_method]['results'][tested_model][fit_method]
+        if (("fit_success" in fitted_model.keys()) and not fitted_model["fit_success"]):
+            dfmodels.loc[tested_model, "AIC"] = 1e3
+            dfmodels.loc[tested_model, "AIC"] = 1e3
+            models_to_remove.append(tested_model)
+            continue
+        fitted_model_res = fitted_model['fit_result']
+        dfmodels.loc[tested_model, "AIC"] = 2*len(fitted_model_res.parameters.free_parameters) + fitted_model_res.total_stat
+        # dfmodels['rel_L'] = np.exp((dfmodels.AIC.min() - dfmodels.AIC) * 0.5)
+        dfmodels.loc[tested_model, 'wilk'] = dfmodels_wilk.loc['No source - No source', tested_model]
+
+    if sig_method == 'wilk': best_models = dfmodels[~dfmodels.index.isin(models_to_remove)].index.to_list()
+    else:
+        best_models = dfmodels[~dfmodels.index.isin(models_to_remove) & (dfmodels.rel_L > np.exp(-rel_L_tsh))].sort_values(by="AIC",ascending=True).index.to_list()
+    
+    models_to_keep = []
+
+    for ibest in range(len(best_models)):
+        tested_model = best_models[ibest]
+        print(f"Tested model: {tested_model}")
+        
+        tested_model_wilk_as_null = dfmodels_wilk.loc[tested_model].copy()
+        tested_model_wilk_as_alt = dfmodels_wilk[tested_model].copy()
+
+        
+        better_alt_models = tested_model_wilk_as_null.loc[(tested_model_wilk_as_null > 3) & (tested_model_wilk_as_null != np.nan)]
+        better_null_models = tested_model_wilk_as_alt.loc[(tested_model_wilk_as_alt < 3) & (tested_model_wilk_as_alt >= 0) & (tested_model_wilk_as_alt != np.nan)]
+
+        worse_alt_models = tested_model_wilk_as_null.loc[(tested_model_wilk_as_null <= 3) & (tested_model_wilk_as_null >= 0) & (tested_model_wilk_as_null != np.nan)]
+        worse_null_models = tested_model_wilk_as_alt.loc[(tested_model_wilk_as_alt >= 3) & (tested_model_wilk_as_alt != np.nan)]
+        
+        if len(better_alt_models) > 0: better_alt_str = f"{len(better_alt_models)} more significant nested models"
+        else: better_alt_str = "No nested model is more significant"
+        if len(better_null_models) > 0: better_null_str = f"Model not more significant than {len(better_null_models)} nesting models"
+        else: better_null_str = "More significant than all nesting models"
+
+        if (len(better_alt_models) > 0) or (len(better_null_models) > 0):
+            models_to_remove.append(tested_model)
+            print(f"{better_null_str}\n{better_alt_str}\nModel removed\n")
+        else:
+            models_to_keep.append(tested_model)
+            print(f"{better_null_str}\n{better_alt_str}\nModel kept\n")
+
+    dfbest_models = dfmodels.reset_index()
+    dfbest_models = dfbest_models[dfbest_models.model.isin(models_to_keep)]
+    dfbest_models = dfbest_models[~dfbest_models.model.isin(models_to_remove)][["model", "wilk", "AIC"]]
+    dfbest_models['relative_L'] = np.exp((dfbest_models.AIC.min() - dfbest_models.AIC) * 0.5)
+    
+    return dfmodels, dfbest_models.sort_values(by="AIC")
 
 def get_plot_kwargs_from_models_dict(models_dict):    
     plot_kwargs = models_dict["plot_kwargs"].copy()
@@ -691,7 +859,9 @@ def plot_ref(ax, ref_models, ref_source_name, ref_model_name, plot_type = "spect
         plot_kwargs.pop("ls_sigma", None)
         ref_source_model.spectral_model.plot(ax=ax, **plot_kwargs)
         plot_kwargs.pop("label", None)
-        ref_source_model.spectral_model.plot_error(ax=ax, alpha=0.1, facecolor=plot_kwargs["color"], **plot_kwargs)
+        edgecolor = plot_kwargs["color"]
+        plot_kwargs.pop("color", None)
+        ref_source_model.spectral_model.plot_error(ax=ax, alpha=0.1, linewidth=1, edgecolor=edgecolor, facecolor="none", hatch='/', **plot_kwargs)
     elif plot_type=='spatial':
         center = SkyCoord(ra=ref_source_model.spatial_model.lon_0.value * u.deg,dec=ref_source_model.spatial_model.lat_0.value * u.deg, frame="icrs")
         sigma = ref_source_model.spatial_model.sigma.value
@@ -702,7 +872,7 @@ def plot_ref(ax, ref_models, ref_source_name, ref_model_name, plot_type = "spect
                                 transform=ax.get_transform('icrs'), label=plot_kwargs["label"])
         ax.add_patch(r)
 
-def plot_spectra_from_models_dict(ax, results, ref_models, ref_source_name, ref_models_to_plot, results_to_plot=['all'], bkg_methods_to_plot=['all'], fit_methods_to_plot=['all'], colors = ['blue', 'darkorange', 'purple', 'green']):
+def plot_spectra_from_models_dict(ax, results, ref_models, ref_source_name, ref_models_to_plot, results_to_plot=['all'], bkg_methods_to_plot=['all'], fit_methods_to_plot=['all'], colors = ['blue', 'darkorange', 'purple', 'green'], plot_flux_points=True):
 
     for ref_model_name in ref_models_to_plot:
         plot_ref(ax, ref_models, ref_source_name, ref_model_name, plot_type = "spectral")
@@ -710,7 +880,6 @@ def plot_spectra_from_models_dict(ax, results, ref_models, ref_source_name, ref_
     bkg_methods = ['ring', 'FoV'] if bkg_methods_to_plot == ['all'] else bkg_methods_to_plot
     fit_methods = ['stacked', 'joint'] if fit_methods_to_plot == ['all'] else fit_methods_to_plot
     tested_models = list(results[bkg_methods[0]]['results'].keys()) if results_to_plot == ['all'] else results_to_plot
-
     i=0
     for bkg_method in bkg_methods:
         for tested_model in tested_models:
@@ -720,23 +889,23 @@ def plot_spectra_from_models_dict(ax, results, ref_models, ref_source_name, ref_
                 for model in results_model[:-1]:
                     model_name = model.name
                     # print(model_name)
-                    flux_points = results[bkg_method]['results'][tested_model][fit_method][model_name]["flux_points"].copy()
-
+                    flux_points = results[bkg_method]['results'][tested_model][fit_method][model_name]["flux_points"]
+                    i_color = 0 if 'tail' in model_name else 1
                     plot_kwargs = {
                         "energy_bounds": [flux_points.energy_min[flux_points.success.data.flatten()][0],flux_points.energy_max[flux_points.success.data.flatten()][-1]] * u.TeV,
                         "sed_type": "e2dnde",
-                        "ls" : "-" if 'tail' in model_name else ":",
-                        "color": colors[i],
+                        "ls" : "-",
+                        "color": colors[i_color],
                         "yunits": u.Unit("TeV cm-2 s-1"),
                     }
-
-                    model.spectral_model.plot(ax=ax,**plot_kwargs.copy())
-                    # plot_kwargs.pop("label", None)
-
-                    model.spectral_model.plot_error(ax=ax, alpha=0.1, facecolor=colors[i], **plot_kwargs.copy())
-
                     label = f"{model_name} ({bkg_method}, {fit_method})"
-                    flux_points.plot(ax=ax, sed_type="e2dnde", label=label, color=colors[i], marker='o' if 'tail' in model_name else "x", markersize=5 if 'tail' in model_name else 7)
+                    if plot_flux_points:
+                        model.spectral_model.plot(ax=ax,**plot_kwargs.copy())
+                        model.spectral_model.plot_error(ax=ax, alpha=0.1, facecolor=colors[i_color], **plot_kwargs.copy())
+                        flux_points.plot(ax=ax, sed_type="e2dnde", label=label, color=colors[i_color], marker='o' if 'tail' in model_name else "x", markersize=5 if 'tail' in model_name else 7)
+                    else:
+                        model.spectral_model.plot(ax=ax,**plot_kwargs.copy(), label=label)
+                        model.spectral_model.plot_error(ax=ax, alpha=0.1, facecolor=colors[i_color], **plot_kwargs.copy())
                 i+=1
 
 def plot_spatial_model_from_dict(bkg_method, key, results, ref_models, ref_source_name, ref_models_to_plot, results_to_plot=['all'], bkg_methods_to_plot=['all'], fit_methods_to_plot=['all'], crop_width=0 * u.deg, estimator='excess', ring_bkg_param=None, figsize=(5,5),bbox_to_anchor=(1,1),fontsize=15, colors = ['blue', 'darkorange', 'purple', 'green']):
@@ -767,7 +936,7 @@ def plot_spatial_model_from_dict(bkg_method, key, results, ref_models, ref_sourc
         },
         'flux': {
             'cbar_label': 'flux [$s^{-1}cm^{-2}$]',
-            'title': f'Flux map ({bkg_method}, {estimator})\nwith 3$\sigma$ (white) and 5$\sigma$ (blue) contour'
+            'title': f'Flux map ({bkg_method}, {estimator})\nwith 3$\sigma$ (white) and 5$\sigma$ (black) contour'
         }
     }
 
@@ -784,20 +953,24 @@ def plot_spatial_model_from_dict(bkg_method, key, results, ref_models, ref_sourc
     cbar_label, title = (skymaps_args[key]["cbar_label"], skymaps_args[key]["title"])
 
     fig,ax=plt.subplots(figsize=figsize,subplot_kw={"projection": skymap.geom.wcs})
-    if key in ['counts', 'background']: skymap.smooth(0.01 * u.deg).plot(ax=ax, add_cbar=True, stretch="linear",kwargs_colorbar={'label': cbar_label})
-    elif key in ['excess', 'ts', 'flux']: skymap.smooth(0.01 * u.deg).plot(ax=ax, add_cbar=True, stretch="linear", cmap='Greys_r',kwargs_colorbar={'label': cbar_label})
+    if key in ['counts', 'background']: skymap.smooth(0.01 * u.deg).plot(ax=ax, add_cbar=True, stretch="linear",kwargs_colorbar={'label': cbar_label, 'shrink':0.75})
+    elif key in ['excess', 'ts', 'flux']:
+        skymap.smooth(0.01 * u.deg).plot(ax=ax, add_cbar=True, stretch="linear", cmap='Greys_r')
+        im = ax.images        
+        cb = im[-1].colorbar
+        cb.set_label(cbar_label)
     elif 'significance' in key: 
-        skymap.smooth(0.01 * u.deg).plot(ax=ax, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma',kwargs_colorbar={'label': cbar_label})
+        skymap.smooth(0.01 * u.deg).plot(ax=ax, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma',kwargs_colorbar={'label': cbar_label, 'shrink':0.75})
         maxsig = np.nanmax(skymap.data)
         minsig = np.nanmin(skymap.data)
         im = ax.images        
-        cb = im[-1].colorbar
+        cb = im[-1].colorbar 
         cb.ax.axhline(maxsig, c='g')
         cb.ax.text(1.1,maxsig - 0.07,' max', color = 'g')
         cb.ax.axhline(minsig, c='g')
         cb.ax.text(1.1,minsig - 0.07,' min', color = 'g')
     
-    ax.contour(skymap_sig.data[0], levels=[3,5], colors=['white', 'mediumblue'], alpha=0.5)
+    ax.contour(skymap_sig.data[0], levels=[3,5], colors=['white', 'black'], alpha=0.5)
 
     for ref_model_name in ref_models_to_plot:
         plot_ref(ax, ref_models, ref_source_name, ref_model_name, plot_type = "spatial")
@@ -824,46 +997,172 @@ def plot_spatial_model_from_dict(bkg_method, key, results, ref_models, ref_sourc
                     model_name = model.name
                     center = SkyCoord(ra=model.spatial_model.lon_0.value * u.deg,dec=model.spatial_model.lat_0.value * u.deg, frame="icrs")
                     label=f"{model_name}{label_methods}"
-                    
+                    i_color = 0 if 'tail' in model_name else 1
                     if j==0:
                         fitted_alternative_model = results[bkg_method]['results'][tested_model][fit_method]['fit_result']
-                        wilk_sig = get_nested_model_wilk_significance(fitted_null_model, fitted_alternative_model)
+                        wilk_sig = get_nested_model_wilk_significance(fitted_null_model, fitted_alternative_model, False)
                         label_wilk= ", $\sqrt{TS}$" + f"={wilk_sig:.2f}"
                     
                     if "Point" in model_name:
                         r = SphericalCircle(center, 0.04 * u.deg,
-                                            edgecolor='black', facecolor=colors[i],
-                                            ls = "-" if j==0 else ":",
+                                            edgecolor='black', facecolor=colors[i_color],
+                                            ls = "-",
                                             lw = 1,
                                             transform=ax.get_transform('icrs'), label=label + label_wilk*(j==0))
                         ax.add_patch(r)
-
-                    if "Gauss" in model_name:
+                    elif "Gauss" in model_name:
                         sigma = model.spatial_model.sigma.value
                         if "1D" in model_name:
                             label += f": $\sigma$={sigma:.2f}°"
                         
                             r = SphericalCircle(center, sigma * u.deg,
-                                                edgecolor=colors[i], facecolor='none',
-                                                ls = "-" if j==0 else ":",
+                                                edgecolor=colors[i_color], facecolor='none',
+                                                ls = "-",
                                                 lw = 3,
                                                 transform=ax.get_transform('icrs'), label=label + label_wilk*(j==0))
                             ax.add_patch(r)
                         else:
                             sky_region = model.spatial_model.to_region(x_sigma=1.)
                             pixel_region = sky_region.to_pixel(skymap.geom.wcs)
-                            label += f": $\sigma_eff$={sigma:.2f}°"
+                            label += ": $\sigma_{eff}$"+f"={sigma:.2f}°"
                             pixel_region.plot(ax=ax,
-                                            color = colors[i],
+                                            color = colors[i_color],
                                             lw=3,
-                                            ls = "-" if j==0 else ":",
+                                            ls = "-",
                                             label=label + label_wilk*(j==0))
+                    elif ("Disk" in model_name) or ("Ellipse" in model_name):
+                        sky_region = model.spatial_model.to_region()
+                        pixel_region = sky_region.to_pixel(skymap.geom.wcs)
+                        if "Disk" in model_name:
+                            r_0 = model.spatial_model.r_0.value
+                            label += f": $r_0$={r_0:.2f}°"
+                        else:
+                            width_ellipse = sky_region.width.value
+                            height_ellipse = sky_region.height.value
+                            label += f": width,heigth={width_ellipse:.2f}°,{height_ellipse:.2f}°"
+
+                        pixel_region.plot(ax=ax,
+                                        color = colors[i_color],
+                                        lw=3,
+                                        ls = "-",
+                                        label=label + label_wilk*(j==0))
                     j+=1
                 i+=1
+    pulsar_pos = SkyCoord.from_name('PSR J2229+6114')
+    if ref_source_name == "boomerang":
+        ax.errorbar(pulsar_pos.ra.value, pulsar_pos.dec.value, fmt='o', ms=5, color='lightgreen', label = 'PSR J2229+6114',
+            transform=ax.get_transform('icrs'))
     ax.set_title(label=title,fontsize=fontsize)
     ax.legend(fontsize=fontsize)
     plt.tight_layout()
     plt.show()
+
+def get_on_region_geom(results:dict, tested_model_name:str, bkg_method='ring', fit_method='stacked', i_component=0, plot=False):
+    skymap = results[bkg_method]['skymaps_excess']['flux']
+    energy_axis = skymap.geom.axes['energy']
+    tested_model = results[bkg_method]['results'][tested_model_name][fit_method]['models'][i_component].copy()
+    model_name = tested_model_name.split(' - ')[i_component]
+    label = model_name
+    if plot:
+        fig,ax=plt.subplots(figsize=(7,5),subplot_kw={"projection": skymap.geom.wcs})
+        colors = ["red"]
+        skymap.smooth(0.01 * u.deg).plot(ax=ax, add_cbar=True, stretch="linear", cmap='Greys_r')
+        i_color=0
+
+    if "Gauss" in model_name:
+        sigma = tested_model.spatial_model.sigma.value
+        sky_region = tested_model.spatial_model.to_region(x_sigma=1.)
+        on_geom = RegionGeom(sky_region, axes=[energy_axis])
+        pixel_region = sky_region.to_pixel(results['ring']['skymaps_excess']['ts'].geom.wcs)
+
+        if "1D" in model_name: label += f": $\sigma$={sigma:.2f}°"
+        else: label += ": $\sigma_{eff}$"+f"={sigma:.2f}°"
+    
+    elif ("Disk" in model_name) or ("Ellipse" in model_name):
+        sky_region = tested_model.spatial_model.to_region()
+        on_geom = RegionGeom(sky_region, axes=[energy_axis])
+        pixel_region = sky_region.to_pixel(results['ring']['skymaps_excess']['ts'].geom.wcs)
+        
+        if "Disk" in model_name:
+            r_0 = tested_model.spatial_model.r_0.value
+            label += f": $r_0$={r_0:.2f}°"
+        else:
+            width_ellipse = sky_region.width.value
+            height_ellipse = sky_region.height.value
+            label += f": width,heigth={width_ellipse:.2f}°,{height_ellipse:.2f}°"
+
+    if plot:
+        pixel_region.plot(ax=ax,
+                    color = colors[i_color],
+                    lw=1,
+                    ls = "-",
+                    label=label)
+        ax.set(title=f"Flux map")
+        plt.legend(loc='upper left', title = 'on region')
+        plt.tight_layout()
+        plt.show()
+    return on_geom
+
+def get_map_residuals_spatial(
+    stacked_dataset,
+    ax=None,
+    method="diff",
+    smooth_kernel="gauss",
+    smooth_radius="0.1 deg",
+    **kwargs,
+):
+    """Plot spatial residuals.
+
+    The normalization used for the residuals computation can be controlled
+    using the method parameter.
+
+    Parameters
+    ----------
+    ax : `~astropy.visualization.wcsaxes.WCSAxes`
+        Axes to plot on.
+    method : {"diff", "diff/model", "diff/sqrt(model)"}
+        Normalization used to compute the residuals, see `MapDataset.residuals`.
+    smooth_kernel : {"gauss", "box"}
+        Kernel shape.
+    smooth_radius: `~astropy.units.Quantity`, str or float
+        Smoothing width given as quantity or float. If a float is given, it
+        is interpreted as smoothing width in pixels.
+    **kwargs : dict
+        Keyword arguments passed to `~matplotlib.axes.Axes.imshow`.
+
+    Returns
+    -------
+    ax : `~astropy.visualization.wcsaxes.WCSAxes`
+        WCSAxes object.
+
+    Examples
+    --------
+    >>> from gammapy.datasets import MapDataset
+    >>> dataset = MapDataset.read("$GAMMAPY_DATA/cta-1dc-gc/cta-1dc-gc.fits.gz")
+    >>> kwargs = {"cmap": "RdBu_r", "vmin":-5, "vmax":5, "add_cbar": True}
+    >>> dataset.plot_residuals_spatial(method="diff/sqrt(model)", **kwargs) # doctest: +SKIP
+    """
+    counts, npred = stacked_dataset.counts.copy(), stacked_dataset.npred()
+
+    if counts.geom.is_region:
+        raise ValueError("Cannot plot spatial residuals for RegionNDMap")
+
+    if stacked_dataset.mask is not None:
+        counts *= stacked_dataset.mask
+        npred *= stacked_dataset.mask
+
+    counts_spatial = counts.sum_over_axes().smooth(
+        width=smooth_radius, kernel=smooth_kernel
+    )
+    npred_spatial = npred.sum_over_axes().smooth(
+        width=smooth_radius, kernel=smooth_kernel
+    )
+    residuals = stacked_dataset._compute_residuals(counts_spatial, npred_spatial, method)
+
+    if stacked_dataset.mask_safe is not None:
+        mask = stacked_dataset.mask_safe.reduce_over_axes(func=np.logical_or, keepdims=True)
+        residuals.data[~mask.data] = np.nan
+    return residuals
 
 #-------------------------------------------------------------------------------------
 # Misc

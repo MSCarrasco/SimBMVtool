@@ -45,4 +45,6 @@ dependencies:
       - PyGithub
       - pypandoc
       - seaborn
-      - BAccMod==0.3.0
+      - build
+      - setuptools
+      # - BAccMod==0.3.0

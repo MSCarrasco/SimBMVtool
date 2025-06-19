@@ -26,9 +26,9 @@ from itertools import product
 
 from IPython.display import display
 from gammapy.data import DataStore, FixedPointingInfo, Observation, observatory_locations, PointingMode
-from gammapy.datasets import MapDataset,MapDatasetEventSampler,Datasets,MapDatasetOnOff
+from gammapy.datasets import MapDataset,MapDatasetEventSampler,Datasets,MapDatasetOnOff,SpectrumDataset
 from gammapy.irf import load_irf_dict_from_file, Background2D, Background3D, FoVAlignment
-from gammapy.makers import FoVBackgroundMaker,MapDatasetMaker, SafeMaskMaker, RingBackgroundMaker
+from gammapy.makers import FoVBackgroundMaker,MapDatasetMaker, SafeMaskMaker, RingBackgroundMaker, AdaptiveRingBackgroundMaker
 from gammapy.maps import MapAxis, WcsGeom, WcsNDMap, Map
 from regions import CircleAnnulusSkyRegion, CircleSkyRegion, EllipseSkyRegion, Regions
 from gammapy.maps.region.geom import RegionGeom
@@ -36,9 +36,13 @@ from gammapy.estimators import ExcessMapEstimator, FluxPointsEstimator
 from gammapy.datasets import Datasets, MapDataset, MapDatasetOnOff
 from astropy.visualization.wcsaxes import SphericalCircle
 
+from cycler import cycler
+from scipy.optimize import curve_fit
+
 from gammapy.modeling import Fit,Parameter
 from gammapy.modeling.models import (
     FoVBackgroundModel,
+    PiecewiseNormSpectralModel,
     GaussianSpatialModel,
     Models,
     SpatialModel,
@@ -47,6 +51,16 @@ from gammapy.modeling.models import (
     LogParabolaSpectralModel,
     SkyModel,
 )
+
+from gammapy.visualization import plot_spectrum_datasets_off_regions
+from gammapy.utils.regions import regions_to_compound_region
+from gammapy.makers import (
+    ReflectedRegionsBackgroundMaker,
+    WobbleRegionsFinder,
+    SafeMaskMaker,
+    SpectrumDatasetMaker,
+)
+
 from gammapy.catalog import SourceCatalogGammaCat, SourceCatalogObject
 
 from scipy.stats import norm as norm_stats
@@ -66,12 +80,15 @@ else: from gammapy.irf.background import Background3D
 from itertools import product
 from baccmod import RadialAcceptanceMapCreator, Grid3DAcceptanceMapCreator, BackgroundCollectionZenith
 from baccmod.toolbox import (get_unique_wobble_pointings)
+from baccmod.logging import MOREINFO, set_log_level,setup_logging_output
+import baccmod
 
 from abc import ABC, abstractmethod
 from typing import Tuple, List, Optional, Union
 from gammapy.datasets import MapDatasetEventSampler
 from gammapy.makers.utils import make_map_background_irf
 
+from bkg_irf_models import gaussian1d, gaussian2d, center_suppressed_bilinear_gaussian2d,center_suppressed2d_bilinear_gaussian2d
 from toolbox import (get_value_at_threshold,
                      compute_residuals,
                      scale_value,
@@ -91,9 +108,9 @@ class BMVCreator(BaseSimBMVtoolCreator):
         region_shape = self.region_shape if self.region_shape != "n_circles" else f"{self.n_circles}_circle{'s'*(self.n_circles > 1)}"
         self.end_name=f'{self.bkg_dim}D_{region_shape}_Ebins_{self.nbin_E_acc}_offsetbins_{self.nbin_offset_acc}_offset_max_{self.size_fov_acc.value:.1f}'+f'_{self.cos_zenith_binning_parameter_value}sperW'*self.zenith_binning+f'_exclurad_{self.exclu_rad}'*((self.exclu_rad != 0) & (self.region_shape != 'noexclusion'))
         self.index_suffix = f"_with_bkg_{self.bkg_dim}d_{self.method}_{self.end_name[3:]}"
-        self.acceptance_files_dir = f"{self.output_dir}/{self.subdir}/{self.method}/acceptances/{self.end_name}"
-        self.plots_dir=f"{self.output_dir}/{self.subdir}/{self.method}/plots"
-        self.data_dir=f"{self.output_dir}/{self.subdir}/{self.method}/data"
+        self.acceptance_files_dir = f"{self.output_dir}/{self.subdir}/{self.method}/{self.end_name}/acceptances"
+        self.plots_dir=f"{self.output_dir}/{self.subdir}/{self.method}/{self.end_name}/plots"
+        self.data_dir=f"{self.output_dir}/{self.subdir}/{self.method}/{self.end_name}/data"
         Path(self.acceptance_files_dir).mkdir(parents=True, exist_ok=True)
         Path(self.plots_dir).mkdir(parents=True, exist_ok=True)
         Path(self.data_dir).mkdir(parents=True, exist_ok=True)
@@ -169,7 +186,7 @@ class BMVCreator(BaseSimBMVtoolCreator):
         
         self.exclude_regions_bkg_irf = self.exclude_regions.copy()
         safe_circle = CircleAnnulusSkyRegion(center=self.source_pos,
-                                    inner_radius=self.size_fov_acc,
+                                    inner_radius=self.cfg_exclusion_region['safe_radius_from_map_center'] * u.deg,
                                     outer_radius=20 * u.deg)
         self.exclude_regions.append(safe_circle)
         self.exclude_regions_not_source.append(safe_circle)
@@ -188,8 +205,8 @@ class BMVCreator(BaseSimBMVtoolCreator):
         
         self.correlation_radius = self.cfg_background_maker["correlation_radius"]
         self.correlate_off = self.cfg_background_maker["correlate_off"]
-        self.ring_bkg_param = [self.cfg_background_maker["ring"]["internal_ring_radius"],self.cfg_background["maker"]["ring"]["width"]]
-        self.fov_bkg_param = self.cfg_background_maker["fov"]["method"]
+        self.ring_bkg_param = [self.cfg_background_maker["ring"]["internal_ring_radius"],self.cfg_background_maker["ring"]["width"]]
+        self.fov_bkg_param = [self.cfg_background_maker["fov"]["method"], self.cfg_background_maker["fov"]["spectral_model"]]
         
         if init_save_paths: self.init_save_paths()    
 
@@ -222,6 +239,33 @@ class BMVCreator(BaseSimBMVtoolCreator):
             self.fit_bounds=self.cfg_acceptance["fit"]["bounds"]
         
         if init_save_paths: self.init_save_paths()
+    
+    def init_hl_analysis(self, cfg_hl_analysis='stored_config') -> None:
+        if isinstance(cfg_hl_analysis, dict):
+            self.cfg_hl_analysis = cfg_hl_analysis
+        else:
+            self.cfg_hl_analysis = self.config["hl_analysis"]
+
+        self.hla_do_baccmod = self.cfg_hl_analysis['do_baccmod']
+        self.hla_e_min = self.cfg_hl_analysis['e_min']
+        self.hla_e_max = self.cfg_hl_analysis['e_max']
+        self.hla_nbin_E_per_decade = self.cfg_hl_analysis['nbin_E_per_decade']
+        self.hla_offset_max = self.cfg_hl_analysis['offset_max']
+        self.hla_width = self.cfg_hl_analysis['width']
+        self.hla_bkg_maker = self.cfg_hl_analysis['bkg_maker']
+        self.hla_fit_method = self.cfg_hl_analysis['hla_fit_method']
+        
+        e_min, e_max = (self.hla_e_min*u.TeV, self.hla_e_max*u.TeV)
+        nbin_E_per_decade = self.hla_nbin_E_per_decade
+        offset_max_dataset = self.hla_offset_max * u.deg
+        width = (self.hla_width,self.hla_width)
+        self.axis_info_dataset = [e_min, e_max, nbin_E_per_decade, offset_max_dataset, width]
+        self.hla_str = f"Eminmax_{e_min}_{e_max}_nbinEperdec_{nbin_E_per_decade}_offmax_{offset_max_dataset}_w_{self.hla_width}_bkg_{'_'.join(self.hla_bkg_maker)}_fit_{self.hla_fit_method}"
+
+        self.plots_dir_hla=f"{self.output_dir}/{self.subdir}/{self.method}/{self.end_name}/hla/{self.hla_str}/plots"
+        self.data_dir_hla=f"{self.output_dir}/{self.subdir}/{self.method}/{self.end_name}/hla/{self.hla_str}/data"
+        Path(self.plots_dir_hla+'/skymaps').mkdir(parents=True, exist_ok=True)
+        Path(self.data_dir_hla).mkdir(parents=True, exist_ok=True)
 
     def init_config_bmv(self, config_path) -> None:
         with open(config_path, 'r') as file:
@@ -486,8 +530,9 @@ class BMVCreator(BaseSimBMVtoolCreator):
             paths = sorted(list(path.rglob("*.fits")))
             file_dir = model_path
             file_name = [file_path.name for file_path in paths]
+        
         for i,obs_id in enumerate(all_obs_ids):
-            if obs_id not in self.obs_ids: 
+            if obs_id not in self.obs_ids:
                 data_store.hdu_table.remove_rows(data_store.hdu_table['OBS_ID']==obs_id)
                 data_store.obs_table.remove_rows(data_store.obs_table['OBS_ID']==obs_id)
             else:
@@ -504,9 +549,36 @@ class BMVCreator(BaseSimBMVtoolCreator):
     
     def do_baccmod(self, config_path=None):
         if config_path is not None: self.init_config(config_path)
+        self.log_level_out = self.cfg_acceptance["log_level"]["output"]
+        self.log_level_term = self.cfg_acceptance["log_level"]["terminal"]
+        self.log_file_path = f'{self.acceptance_files_dir}/baccmod_log{self.index_suffix}.o'
+        
+        set_log_level(self.log_level_out, "baccmod")
+        setup_logging_output(output_file=self.log_file_path, use_terminal=True, term_level=self.log_level_term)
 
         self.load_observation_collection()
-
+        if self.fit_fnc == 'center_suppressed2d_bilinear_gaussian2d':
+            
+            fit_fnc = center_suppressed2d_bilinear_gaussian2d
+            fit_seeds = {'x_cm': 0, 'y_cm': 0, 'width': 1, 'length': 1,
+                                                        'psi': 0, 'x_gradient': 0, 'y_gradient': 0,
+                                                        'sup_ratio': 0, 'sup_w':1, 'sup_l':1, 'sup_psi':0}
+            l=2
+            fit_bounds = {'x_cm': (-2, 2), 'y_cm': (-2, 2), 'width': (0.1, 5),
+                                                            'length': (0.1, 5), 'psi': (0, 6.283185307179586),
+                                                            'x_gradient': (-l, l), 'y_gradient': (-l, l),
+                                                            'sup_ratio': (-0.99, 0.99), 'sup_w': (0.3, 5), 'sup_l': (0.3, 5), 'sup_psi': (0, 6.283185307179586)}
+        elif self.fit_fnc == 'gaussian1d':
+            fit_fnc = gaussian1d
+            fit_seeds={'x_cm': gaussian2d.default_seeds['x_cm'],
+                'y_cm': gaussian2d.default_seeds['y_cm'],
+                'sigma': gaussian2d.default_seeds['length']}
+            fit_bounds =self.fit_bounds
+        else:
+            fit_fnc = self.fit_fnc
+            fit_bounds = self.fit_bounds
+            fit_seeds = None
+        
         if self.bkg_dim==2:
             acceptance_model_creator = RadialAcceptanceMapCreator(self.energy_axis_acceptance,
                                                                 self.offset_axis_acceptance,
@@ -524,8 +596,9 @@ class BMVCreator(BaseSimBMVtoolCreator):
                                                             cos_zenith_binning_method=self.cos_zenith_binning_method,
                                                             cos_zenith_binning_parameter_value=self.cos_zenith_binning_parameter_value,
                                                             method=self.method,
-                                                            fit_fnc=self.fit_fnc,
-                                                            fit_bounds=self.fit_bounds)
+                                                            fit_fnc=fit_fnc,
+                                                            fit_bounds=fit_bounds,
+                                                            fit_seeds=fit_seeds)
 
         acceptance_model = acceptance_model_creator.create_acceptance_map_per_observation(self.obs_collection,zenith_binning=self.zenith_binning,
                                                                                           zenith_interpolation=self.zenith_interpolation,runwise_normalisation=self.runwise_normalisation) 
@@ -637,12 +710,12 @@ class BMVCreator(BaseSimBMVtoolCreator):
             else: maker = MapDatasetMaker(selection=maps)
 
         maker_safe_mask = SafeMaskMaker(methods=["offset-max"], offset_max=offset_max)
-        
+
         for obs in self.obs_collection:
             dataset_map = maker.run(base_map_dataset.copy(), obs)
             dataset_map = maker_safe_mask.run(dataset_map, obs)
+            # dataset_map.mask_safe.data=(dataset_map.mask_safe.data.T * (np.sum(np.sum(dataset_map.counts, axis=1), axis=1)>10)).T
             unstacked_datasets.append(dataset_map)
-        
 
         if unstacked_datasets_savename != "": self.save_dataset(unstacked_datasets_savename, self.unstacked_datasets)
         return unstacked_datasets
@@ -709,15 +782,19 @@ class BMVCreator(BaseSimBMVtoolCreator):
 
         if bkg_method == 'ring': 
             internal_ring_radius, width_ring = self.ring_bkg_param
-            ring_bkg_maker = RingBackgroundMaker(r_in=internal_ring_radius * u.deg,
-                                                            width=width_ring * u.deg,
-                                                            exclusion_mask=exclusion_mask)
+            # ring_bkg_maker = RingBackgroundMaker(r_in=internal_ring_radius * u.deg,
+            #                                                 width=width_ring * u.deg,
+            #                                                 exclusion_mask=exclusion_mask)
+            ring_bkg_maker = AdaptiveRingBackgroundMaker(r_in=internal_ring_radius * u.deg, r_out_max = 0.5 * u.deg, width=0.1 * u.deg, stepsize='0.02 deg',
+                                                            threshold_alpha=0.1, theta='0.22 deg',
+                                                            method='fixed_width', exclusion_mask=exclusion_mask)
             stacked_on_off = MapDatasetOnOff.create(geom=geom_image, energy_axis_true=energy_axis_true, name="stacked")
             print("Ring background method is applied")
         else: 
             stacked_on_off = Datasets()
             if bkg_method == 'FoV':
-                FoV_background_maker = FoVBackgroundMaker(method=self.fov_bkg_param, exclusion_mask=exclusion_mask)
+                method, spectral_model = self.fov_bkg_param
+                FoV_background_maker = FoVBackgroundMaker(method=method, spectral_model=spectral_model, exclusion_mask=exclusion_mask)
                 print("FoV background method is applied")
             else: print("No background maker is applied")
 
@@ -753,8 +830,8 @@ class BMVCreator(BaseSimBMVtoolCreator):
         radius_centers = radius_edges[:-1]+0.5*(radius_edges[1:]-radius_edges[:-1])
         self.radius_edges = radius_edges
         self.radius_centers = radius_centers
-        # radius_edges = bmv.radius_edges
-        # radius_centers = bmv.radius_centers
+        # radius_edges = self.radius_edges
+        # radius_centers = self.radius_centers
 
         dfcoord = pd.DataFrame(index=pd.Index(fov_centers,name='fov_lon'),columns=pd.Index(fov_centers,name='fov_lat'))
         for (lon,lat) in product(dfcoord.index,dfcoord.columns): dfcoord.loc[lon,lat] = np.sqrt(lon**2 + lat**2)
@@ -825,8 +902,8 @@ class BMVCreator(BaseSimBMVtoolCreator):
         E_centers = self.Ebin_mid
         offset_edges = fov_edges[fov_edges >= 0]
         offset_centers = fov_centers[fov_centers >= 0]
-        # radius_centers = simbmv.radius_centers
-        # radius_edges = simbmv.radius_edges
+        # radius_centers = simself.radius_centers
+        # radius_edges = simself.radius_edges
         radius_edges = np.linspace(0,self.size_fov_acc.value,self.nbin_offset_acc+1)
         radius_centers = radius_edges[:-1]+0.5*(radius_edges[1:]-radius_edges[:-1])
 
@@ -1077,7 +1154,7 @@ class BMVCreator(BaseSimBMVtoolCreator):
             plt.show()
             if fig_save_path != '': fig.savefig(fig_save_path[:-4]+f"_offset_Ebin_{'all' if (Ebin==-1) else iEbin-1}.png", dpi=300, transparent=False, bbox_inches='tight')    
 
-    def plot_model(self, data='acceptance', irf='true', residuals='none', profile='none', downsampled=True, i_irf=0, n_obs=1, zenith_binned=False,res_lim_for_nan = 1., title='', fig_save_path='', plot_hist=False) -> None:
+    def plot_model(self, data='acceptance', irf='true', residuals='none', profile='none', downsampled=True, i_irf=0, n_obs=1, i_wobble=0, zenith_binned=False,res_lim_for_nan = 1., title='', fig_save_path='', figsize_factor=[1,1], plot_hist=False) -> None:
         '''
         data types = ['acceptance', 'bkg_map']
         irf types = ['true', 'output', 'both']
@@ -1131,17 +1208,19 @@ class BMVCreator(BaseSimBMVtoolCreator):
             if radec_map:            
                 # By default the map is for W1 pointing
                 # TO-DO: option to chose the pointing
-                pointing, run_info = self.wobble_pointings[i_irf], self.wobble_run_info[i_irf]
+                pointing, run_info = self.wobble_pointings[i_wobble], self.wobble_run_info[i_wobble]
                 pointing_info = FixedPointingInfo(mode=PointingMode.POINTING, fixed_icrs=pointing, location=self.loc)
                 obstime = Time(self.t_ref)
                 ontime = n_obs*self.livetime_simu * u.s
 
                 if downsampled:
-                    geom_irf = self.bkg_true_down_irf
+                    try: geom_irf = self.bkg_true_down_irf
+                    except:  geom_irf = self.bkg_true_down_irf_collection[i_irf]
                     oversampling=None
                     offset_max = self.size_fov_acc
                 else: 
-                    geom_irf = self.bkg_true_irf
+                    try: geom_irf = self.bkg_true_irf
+                    except:  geom_irf = self.bkg_true_irf_collection[i_irf]
                     oversampling=self.down_factor
                     offset_max = self.size_fov_irf
                 
@@ -1163,7 +1242,7 @@ class BMVCreator(BaseSimBMVtoolCreator):
                         map_out = make_map_background_irf(pointing_info, ontime, out, geom, oversampling=oversampling, use_region_center=True, obstime=obstime, fov_rotation_error_limit=self.fov_rotation_error_limit)
                     else:
                         map_out = make_map_background_irf(pointing_info, ontime, out, geom, oversampling=oversampling, use_region_center=True, obstime=obstime)
-                    map_out_cut = map_true.cutout(position=pointing,width=2*self.size_fov_acc)
+                    map_out_cut = map_out.cutout(position=pointing,width=2*self.size_fov_acc)
                     if plot_residuals_data: 
                         map_out_cut.sum_over_axes(["energy"]).plot(add_cbar=True, stretch="linear")
                         plt.show()
@@ -1198,8 +1277,8 @@ class BMVCreator(BaseSimBMVtoolCreator):
                     res = map_res_cut.data[0]
                     if residuals=='diff/true': res *= 100
                     vlim = np.nanmax(np.abs(res))
-                    colorbarticks = np.concatenate((np.flip(-np.logspace(-1,3,5)),[0],np.logspace(-1,3,5)))
-                    heatmap = ax.imshow(res, origin='lower', norm=SymLogNorm(linthresh=0.03, linscale=0.03, vmin=-vlim, vmax=vlim), cmap='coolwarm')
+                    colorbarticks = np.concatenate((np.flip(-np.logspace(-3,3,7)),[0],np.logspace(-3,3,7)))
+                    heatmap = ax.imshow(res, origin='lower', norm=SymLogNorm(linthresh=0.01, linscale=1, vmin=-vlim, vmax=vlim), cmap='coolwarm')
                     plt.colorbar(heatmap,ax=ax, shrink=0.75, ticks=colorbarticks, label=res_label)
                     x_lim = ax.get_xlim()
                     xticks_new = scale_value(fov_bin_edges,fov_lim,x_lim).round(1)
@@ -1209,16 +1288,18 @@ class BMVCreator(BaseSimBMVtoolCreator):
                     plt.tight_layout()
                     plt.show()
 
-            fig, axs = plt.subplots(nrows=rows, ncols=cols, figsize=(width, rows * width // (cols * (1 + cfraction))))
+            fig, axs = plt.subplots(nrows=rows, ncols=cols, figsize=(figsize_factor[0]*width, figsize_factor[1] * rows * width // (cols * (1 + cfraction))))
             for iax, ax in enumerate(axs.flat[:n]):
                 if plot_residuals_data:
                     res_label = res_type_label
                     res = deepcopy(self.res_arr[iax,:,:])
                     if residuals=='diff/true': res *= 100
                     vlim = np.nanmax(np.abs(res))
-                    colorbarticks = np.concatenate((np.flip(-np.logspace(-1,3,5)),[0],np.logspace(-1,3,5)))
-                    heatmap = ax.imshow(res, origin='lower', norm=SymLogNorm(linthresh=0.03, linscale=0.03, vmin=-vlim, vmax=vlim), cmap='coolwarm')
-                    plt.colorbar(heatmap,ax=ax, shrink=1, ticks=colorbarticks, label=res_label)
+                    colorbarticks = np.concatenate((np.flip(-np.logspace(-3,3,7)),[0],np.logspace(-3,3,7)))
+                    norm = SymLogNorm(linthresh=0.01, linscale=1, vmin=-vlim, vmax=vlim) if residuals == "diff/true" else  CenteredNorm(vcenter=0) 
+                    heatmap = ax.imshow(res, origin='lower', norm=norm, cmap='coolwarm')
+                    if residuals == "diff/true": plt.colorbar(heatmap,ax=ax, shrink=1, ticks=colorbarticks, label=res_label)
+                    else: plt.colorbar(heatmap,ax=ax, shrink=1, label=res_label)
                 else:
                     if (irf == 'output'): data = out
                     elif (irf == 'true'): data = true
@@ -1253,6 +1334,7 @@ class BMVCreator(BaseSimBMVtoolCreator):
                     plt.show()
                     if fig_save_path != '': fig.savefig(fig_save_path[:-4]+'_distrib.png', dpi=300, transparent=False, bbox_inches='tight')
         else: print("No data to plot")
+        return data
     
     def plot_zenith_binned_model(self, data='acceptance', irf='output', i_bin=-1, zenith_bins='baccmod', residuals='none', profile='none', fig_save_path='') -> None:
         '''Create a zenith binned collection and plot model data
@@ -1428,31 +1510,52 @@ class BMVCreator(BaseSimBMVtoolCreator):
         fontsize=15
         ax3.set_title("Spatial residuals map: diff/sqrt(model)", fontsize=fontsize)
         dataset.plot_residuals_spatial(method='diff/sqrt(model)',ax=ax3, add_cbar=True, stretch="linear",norm=CenteredNorm())
+        # im3 = ax3.images[-1]
+        # cax3 = fig.add_axes([ax3.get_position().x1+0.05,ax3.get_position().y0,0.04,ax3.get_position().height])
+        # plt.colorbar(im3, cax=cax3, label="diff/sqrt(model)")
+        
         # plt.colorbar(g,ax=ax1, shrink=1, label='diff/sqrt(model)')
         
-        ax5.set_title(f"Significance map ({estimator})\nwith 3$\sigma$ (white) and 5$\sigma$ (blue) contour")
+        ax5.set_title(f"Significance map ({estimator})\nwith 3$\sigma$ (white) and 5$\sigma$ (red) contour")
         #significance_map.plot(ax=ax1, add_cbar=True, stretch="linear")
         self.skymaps_dict["significance_all"].plot(ax=ax5, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma')
-        ax5.contour(self.skymaps_dict["significance_all"].data[0], levels=[3,5], colors=['white', 'mediumblue'], alpha=0.5)
+        # im5 = ax5.images[-1]
+        # cax5 = fig.add_axes([ax5.get_position().x1+0.05,ax5.get_position().y0,0.04,ax5.get_position().height])
+        # plt.colorbar(im5, cax=cax5, label="$\sigma = \sqrt{TS}$")
+        ax5.contour(self.skymaps_dict["significance_all"].data[0], levels=[3,5], colors=['white', 'red'], alpha=0.5)
         
         ax6.set_title("Off significance map")
         #significance_map.plot(ax=ax1, add_cbar=True, stretch="linear")
         self.skymaps_dict["significance_off"].plot(ax=ax6, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma')
+        # im6 = ax6.images[-1]
+        # cax6 = fig.add_axes([ax6.get_position().x1+0.05,ax6.get_position().y0,0.04,ax6.get_position().height])
+        # plt.colorbar(im6, cax=cax6, label="$\sigma = \sqrt{TS}$")
 
         if estimator == 'excess':
             ax4.set_title("Excess map")
             self.skymaps_dict["excess"].plot(ax=ax4, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma')
+            cbar_label4 = "events"
         elif estimator == 'ts':
             ax4.set_title("TS map")
             self.skymaps_dict["ts"].plot(ax=ax4, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma')
-        
+            cbar_label4 = "TS"
+        # im4 = ax4.images[-1]
+        # cax4 = fig.add_axes([ax4.get_position().x1+0.05,ax4.get_position().y0,0.04,ax4.get_position().height])
+        # plt.colorbar(im4, cax=cax4, label="$\sigma = \sqrt{TS}$")
+
         # Background and counts
 
         ax2.set_title("Background map")
         self.skymaps_dict["background"].plot(ax=ax2, add_cbar=True, stretch="linear")
+        # im2 = ax2.images[-1]
+        # cax2 = fig.add_axes([ax2.get_position().x1+0.05,ax2.get_position().y0,0.04,ax2.get_position().height])
+        # plt.colorbar(im2, cax=cax2, label="events")
 
         ax1.set_title("Counts map")
         self.skymaps_dict["counts"].plot(ax=ax1, add_cbar=True, stretch="linear")
+        # im1 = ax1.images[-1]
+        # cax1 = fig.add_axes([ax1.get_position().x1+0.05,ax1.get_position().y0,0.04,ax1.get_position().height])
+        # plt.colorbar(im1, cax=cax1, label="events")
         
         if method=='ring':
             ring_center_pos = self.source_pos
@@ -1472,69 +1575,6 @@ class BMVCreator(BaseSimBMVtoolCreator):
         # Residuals
         fig = self.plot_residuals_histogram()
         fig.savefig(f"{fig_save_path[:-4]}_sigma_residuals.png", dpi=300, transparent=False, bbox_inches='tight')
-
-    def get_dataset_1(self, bkg_method=None, axis_info_dataset=None, unstacked_datasets=None, npix_factor=1, return_stacked=True):
-        source,source_pos,source_region = self.source_info
-        if axis_info_dataset is not None: self.axis_info_dataset = axis_info_dataset
-        emin,emax,nbin_E_per_decade,offset_max,width = self.axis_info_dataset
-
-        if unstacked_datasets is None: self.unstacked_datasets = self.get_unstacked_datasets(axis_info_dataset=self.axis_info_dataset)
-        elif isinstance(unstacked_datasets, Datasets): self.unstacked_datasets = unstacked_datasets
-        
-        # Stack the datasets
-        unstacked_datasets_local = self.unstacked_datasets.copy()
-        geom = unstacked_datasets_local[0]._geom
-        energy_axis=geom.axes["energy"]
-        # Reduced IRFs are defined in true energy (i.e. not measured energy). 
-        # The bounds need to take into account the energy dispersion. 
-        edisp_frac = 0.3
-        emin_true,emax_true = ((1-edisp_frac)*emin , (1+edisp_frac)*emax)
-        nbin_energy_true = 5
-
-        energy_axis_true = MapAxis.from_energy_bounds(
-            emin_true, emax_true, nbin=nbin_energy_true, per_decade=True, unit=energy_axis.unit, name="energy_true"
-        )
-
-        ## Make the exclusion mask
-        if self.region_shape!='noexclusion': exclusion_mask = geom.region_mask(self.exclude_regions, inside=False)
-        else: exclusion_mask=None
-        
-        ## Make the MapDatasetOnOff
-        if bkg_method == 'ring': 
-            internal_ring_radius, width_ring = self.ring_bkg_param
-            ring_bkg_maker = RingBackgroundMaker(r_in=internal_ring_radius * u.deg,
-                                                            width=width_ring * u.deg,
-                                                            exclusion_mask=exclusion_mask)
-            # stacked_on_off = self.unstacked_datasets.copy().stack_reduce()
-            # stacked_on_off = ring_bkg_maker.run(stacked_on_off)
-            print("Ring background method is applied")
-            stacked_on_off = Datasets()
-            for dataset_loc in unstacked_datasets_local:
-                dataset_loc.counts.data[~dataset_loc.mask_safe] = 0
-                dataset_loc = ring_bkg_maker.run(dataset_loc)
-                        
-                stacked_on_off.append(dataset_loc)
-        else: 
-            stacked_on_off = Datasets()
-            if bkg_method == 'FoV':
-                FoV_background_maker = FoVBackgroundMaker(method=self.fov_bkg_param, exclusion_mask=exclusion_mask)
-                print("FoV background method is applied")
-            else: print("No background maker is applied")
-
-            for dataset_loc in unstacked_datasets_local:
-                if bkg_method == 'FoV':
-                    dataset_loc.counts.data[~dataset_loc.mask_safe] = 0
-                    dataset_loc = FoV_background_maker.run(dataset_loc)
-                    if self.fov_bkg_param == 'fit':
-                        fit_result = dataset_loc.models.to_parameters_table()
-                        norm_fit = fit_result[fit_result['name']=='norm']['value'][0]
-                        if norm_fit > 1.5 or norm_fit < 0.5:
-                            print(f"Fit for this dataset {dataset_loc.name} exceeds recommended limits. The norm of the fit is {norm_fit}.")
-                        
-                stacked_on_off.append(dataset_loc)
-            
-        if return_stacked: return stacked_on_off.stack_reduce()
-        else: return stacked_on_off
     
     def get_dataset(self, bkg_method=None, axis_info_dataset=None, unstacked_datasets=None, npix_factor=1, bkg_on_stacked_dataset=True, return_stacked=True):
         source,source_pos,source_region = self.source_info
@@ -1546,6 +1586,7 @@ class BMVCreator(BaseSimBMVtoolCreator):
         
         # Stack the datasets
         unstacked_datasets_local = self.unstacked_datasets.copy()
+
         geom = unstacked_datasets_local[0]._geom
         energy_axis=geom.axes["energy"]
         # Reduced IRFs are defined in true energy (i.e. not measured energy). 
@@ -1559,7 +1600,9 @@ class BMVCreator(BaseSimBMVtoolCreator):
         )
 
         ## Make the exclusion mask
-        if self.region_shape!='noexclusion': exclusion_mask = geom.region_mask(self.exclude_regions, inside=False)
+        if self.region_shape!='noexclusion':
+            if bkg_on_stacked_dataset: exclusion_mask = geom.region_mask(self.exclude_regions, inside=False)
+            else: exclusion_mask = geom.region_mask(self.exclude_regions_bkg_irf, inside=False)
         else: exclusion_mask=None
         
         ## Make the MapDatasetOnOff
@@ -1568,27 +1611,42 @@ class BMVCreator(BaseSimBMVtoolCreator):
             bkg_maker = RingBackgroundMaker(r_in=internal_ring_radius * u.deg,
                                                             width=width_ring * u.deg,
                                                             exclusion_mask=exclusion_mask)
+            # bkg_maker = AdaptiveRingBackgroundMaker(r_in=internal_ring_radius * u.deg, r_out_max = 0.5 * u.deg, width=0.1 * u.deg, stepsize='0.02 deg',
+            #                                                 threshold_alpha=0.1, theta= 0.5 * u.deg,
+            #                                                 method='fixed_width', exclusion_mask=exclusion_mask)
             print("Ring background method is applied")
         elif bkg_method == 'FoV':
-            bkg_maker = FoVBackgroundMaker(method=self.fov_bkg_param, exclusion_mask=exclusion_mask)
+            method, spectral_model = self.fov_bkg_param
+            if spectral_model == 'piecewise-norm':
+                spectral_model = PiecewiseNormSpectralModel(
+                                            energy=energy_axis.center,
+                                            norms=np.ones(energy_axis.center.shape),
+                                            )
+            bkg_maker = FoVBackgroundMaker(method=method, spectral_model=spectral_model, exclusion_mask=exclusion_mask)
             print("FoV background method is applied")
         else: print("No background maker is applied")
         
         if bkg_on_stacked_dataset:
+            print("Background maker applied on stacked dataset")
             stacked_on_off = unstacked_datasets_local.copy().stack_reduce()
+
             if bkg_method in ['ring','FoV']:
-                stacked_on_off.counts.data[~stacked_on_off.mask_safe] = 0
+                # stacked_on_off.counts.data[~stacked_on_off.mask_safe] = 0
                 stacked_on_off = bkg_maker.run(stacked_on_off)
+                # stacked_on_off = maker_safe_mask.run(stacked_on_off, observation=None)
+
             if (bkg_method == 'FoV') and (self.fov_bkg_param == 'fit'):
                 fit_result = stacked_on_off.models.to_parameters_table()
                 norm_fit = fit_result[fit_result['name']=='norm']['value'][0]
                 if norm_fit > 1.5 or norm_fit < 0.5:
                     print(f"Fit for this dataset {stacked_on_off.name} exceeds recommended limits. The norm of the fit is {norm_fit}.")
         else:
+            print("Background maker applied run-wise")
             stacked_on_off = Datasets()
             for dataset_loc in unstacked_datasets_local:
-                dataset_loc.counts.data[~dataset_loc.mask_safe] = 0
+                # dataset_loc.counts.data[~dataset_loc.mask_safe] = 0
                 dataset_loc = bkg_maker.run(dataset_loc)
+                # dataset_loc = maker_safe_mask.run(dataset_loc)
                 if (bkg_method == 'FoV') and (self.fov_bkg_param == 'fit'):
                         fit_result = dataset_loc.models.to_parameters_table()
                         norm_fit = fit_result[fit_result['name']=='norm']['value'][0]
@@ -1599,7 +1657,7 @@ class BMVCreator(BaseSimBMVtoolCreator):
             if return_stacked: stacked_on_off=stacked_on_off.stack_reduce()
         return stacked_on_off
 
-    def plot_skymaps(self, bkg_method='ring', unstacked_datasets=None, stacked_dataset=None, axis_info_dataset=None, estimator='excess', model_source=None, map_width_factor=1):
+    def plot_skymaps(self, bkg_method='ring', unstacked_datasets=None, stacked_dataset=None, axis_info_dataset=None, estimator='excess', model_source=None, map_width_factor=1, bkg_on_stacked_dataset=False, fig_save_path=''):
         if axis_info_dataset is not None: self.axis_info_dataset = axis_info_dataset
         # if axis_info_map is not None: self.axis_info_map = axis_info_map
         if (stacked_dataset is None):
@@ -1608,8 +1666,8 @@ class BMVCreator(BaseSimBMVtoolCreator):
             elif unstacked_datasets == 'stored': print("Using stored unstacked datasets")
 
         if stacked_dataset is None:
-            unstacked=self.unstacked_datasets.copy()
-            self.stacked_dataset = self.get_dataset(bkg_method=bkg_method, unstacked_datasets=unstacked)
+            if bkg_method == 'ring': self.stacked_dataset = self.get_dataset(bkg_method=bkg_method, unstacked_datasets="stored", bkg_on_stacked_dataset=bkg_on_stacked_dataset)
+            else:  self.stacked_dataset = self.get_dataset(bkg_method=bkg_method, bkg_on_stacked_dataset=False, unstacked_datasets="stored")
         elif isinstance(stacked_dataset, MapDataset) or  isinstance(stacked_dataset, MapDatasetOnOff):
             self.stacked_dataset = stacked_dataset
         elif isinstance(stacked_dataset,str):
@@ -1627,10 +1685,10 @@ class BMVCreator(BaseSimBMVtoolCreator):
         # TO-DO: change this to be able to give different parameters for dataset and map
         self.axis_info_map = self.axis_info_dataset
         if map_width_factor != 1:
-            center_pos = SkyCoord(ra=stacked_dataset._geom.center_coord[0],dec=stacked_dataset._geom.center_coord[1],frame='icrs')
-            width =  map_width_factor * stacked_dataset._geom.width[0][0]
-            self.plot_lima_maps(self.stacked_dataset.cutout(center_pos, width), self.axis_info_dataset, bkg_method, estimator, model_source)
-        else: self.plot_lima_maps(self.stacked_dataset, self.axis_info_dataset, bkg_method, estimator, model_source)
+            center_pos = SkyCoord(ra=self.stacked_dataset._geom.center_coord[0],dec=self.stacked_dataset._geom.center_coord[1],frame='icrs')
+            width =  map_width_factor * self.stacked_dataset._geom.width[0][0]
+            self.plot_lima_maps(self.stacked_dataset.cutout(center_pos, width), self.axis_info_dataset, bkg_method, estimator, model_source, fig_save_path)
+        else: self.plot_lima_maps(self.stacked_dataset, self.axis_info_dataset, bkg_method, estimator, model_source, fig_save_path)
 
     def do_3d_analysis(self, models_to_test:SkyModel, spectral_model_bkg, bkg_method='FoV', fit_method='stacked', unstacked_datasets=None, stacked_dataset=None, axis_info_dataset=None, source_info=None, size_roi=0.16 * u.deg, mask_fit=None, dataset_savenames = ("", "")):
         if source_info is None: source_info = self.source_info
@@ -1660,8 +1718,9 @@ class BMVCreator(BaseSimBMVtoolCreator):
         # First look
         stacked = self.stacked_dataset.copy()
 
-        map_width_factor=2.*(self.size_fov_acc/stacked._geom.width[0][0]).value
+        # map_width_factor=2.*(self.size_fov_acc/stacked._geom.width[0][0]).value
         energy_axis=stacked._geom.axes["energy"]
+        map_width_factor=1
         self.plot_skymaps(bkg_method, stacked_dataset=stacked, map_width_factor = map_width_factor)
         skymaps_excess = self.skymaps_dict.copy()
 
@@ -1730,7 +1789,7 @@ class BMVCreator(BaseSimBMVtoolCreator):
 
                 models_joint = Models()
 
-                if model_name != "No source":
+                if model_name not in ["No source","No source - No source"]:
                     for component in model_source: models_joint.append(component.copy(name=component.name))
                     self.plot_skymaps(bkg_method, stacked_dataset=stacked, estimator='ts', model_source=models_joint[0], map_width_factor=map_width_factor)
                     skymaps_ts = self.skymaps_dict
@@ -1753,40 +1812,238 @@ class BMVCreator(BaseSimBMVtoolCreator):
 
                 fit_joint = Fit()
                 result_joint = fit_joint.run(datasets=analysis_joint)
-                print(models_joint)
-                display(models_joint.to_parameters_table())
+                try:
+                    minuit = result.optimize_result.minuit
+                    print(models_joint)
+                    display(models_joint.to_parameters_table())
 
-                stacked = analysis_joint.stack_reduce()
-                stacked.models = [models_joint]
-                plt.figure()
-                stacked.plot_residuals_spatial(method='diff/sqrt(model)',vmin=None, vmax=None)
-                plt.show()
-                
-                results[model_name]["joint"]={
-                        "fit_result" : result_joint,
-                        "models" : models_joint.copy()
-                    }
-                
-                for component in models_joint[:-1]:
-                    region = CircleSkyRegion(component.spatial_model.position, radius=size_roi)
-                    stacked.plot_residuals(
-                        kwargs_spatial=dict(method="diff/sqrt(model)", vmin=-0.5, vmax=0.5),
-                        kwargs_spectral=dict(region=region),
-                    )
+                    stacked = analysis_joint.stack_reduce()
+                    stacked.models = [models_joint]
+                    plt.figure()
+                    stacked.plot_residuals_spatial(method='diff/sqrt(model)',vmin=None, vmax=None)
                     plt.show()
-
-                    fpe_joint = FluxPointsEstimator(
-                    energy_edges=energy_axis.edges, source=component.name, selection_optional="all"
-                    )
-                    flux_points_joint = fpe.run(datasets=analysis_joint)
                     
-                    results[model_name]["joint"][component.name]= {
-                        "model" : component.copy(),
-                        "flux_points" : flux_points_joint
-                    }
+                    results[model_name]["joint"]={
+                            "fit_success" : True,
+                            "fit_result" : result_joint,
+                            "models" : models_joint.copy()
+                        }
+                    
+                    for component in models_joint[:-1]:
+                        region = CircleSkyRegion(component.spatial_model.position, radius=size_roi)
+                        stacked.plot_residuals(
+                            kwargs_spatial=dict(method="diff/sqrt(model)", vmin=-0.5, vmax=0.5),
+                            kwargs_spectral=dict(region=region),
+                        )
+                        plt.show()
+
+                        fpe_joint = FluxPointsEstimator(
+                        energy_edges=energy_axis.edges, source=component.name, selection_optional="all"
+                        )
+                        flux_points_joint = fpe_joint.run(datasets=analysis_joint)
+                        
+                        results[model_name]["joint"][component.name]= {
+                            "model" : component.copy(),
+                            "flux_points" : flux_points_joint
+                        }
+                except:
+                    results[model_name]["joint"]={
+                            "fit_success" : False
+                        }
 
         self.results_3d = {
             "skymaps_excess" : skymaps_excess,
             "results" : results
         }
         return self.results_3d
+
+    def do_1d_analysis(self, models_to_test, unstacked_datasets=None, bkg_method='reflected', fit_method='stacked', map_width_factor = 1, nbin_E_arr=[6,4], n_off_regions=3, init_config_hla=True):
+        if init_config_hla: self.init_hl_analysis()
+        emin,emax,nbin_E_per_decade,offset_max,width = self.axis_info_dataset
+        unit_map="TeV"
+
+        geom = WcsGeom.create(
+            width=width, binsz=0.02, skydir=self.source_pos, proj="CAR", frame="icrs"
+        )
+        if self.region_shape!='noexclusion': exclusion_mask =  ~geom.region_mask([regions_to_compound_region(self.exclude_regions)])
+        else: exclusion_mask=None
+
+        results = models_to_test.copy()
+        
+        for model_source_name in results:
+            model_source = results[model_source_name]["models"]
+            on_region_radius=results[model_source_name]['roi']
+            on_region_skydir = results[model_source_name]['center']
+            fit_dict={}
+            for i, nbin_E in enumerate(nbin_E_arr):
+                self.axis_info_dataset[2] = nbin_E
+
+                energy_axis = MapAxis.from_energy_bounds(
+                    emin, emax, nbin=nbin_E_arr[i], per_decade=True, unit=unit_map, name="energy"
+                )
+                energy_edges = energy_axis.edges
+                on_region = CircleSkyRegion(center=on_region_skydir, radius=on_region_radius)
+
+                on_geom = RegionGeom(on_region, axes=[energy_axis])
+                edisp_frac = 0.3
+                emin_true,emax_true = ((1-edisp_frac)*emin , (1+edisp_frac)*emax)
+                nbin_energy_true = 6
+
+                energy_axis_true = MapAxis.from_energy_bounds(
+                    emin_true, emax_true, nbin=nbin_energy_true, per_decade=True, unit=energy_axis.unit, name="energy_true"
+                )
+
+                print(f"Measured energy axis bounds: {emin:.1f} - {emax:.1f} {unit_map}")
+                print(f"True energy axis bounds: {emin_true:.1f} - {emax_true:.1f} {unit_map}")
+                
+                if bkg_method == 'reflected':
+                    dataset_empty = SpectrumDataset.create(geom=on_geom, energy_axis_true=energy_axis_true)
+
+                    dataset_maker = SpectrumDatasetMaker(
+                        containment_correction=False,use_region_center=True, selection=["counts", "exposure", "edisp"]
+                    )
+
+                
+                    if isinstance(n_off_regions, int):
+                        region_finder = WobbleRegionsFinder(n_off_regions=n_off_regions)
+                        bkg_maker = ReflectedRegionsBackgroundMaker(region_finder=region_finder,exclusion_mask=exclusion_mask)
+                    elif n_off_regions == 'auto':
+                        bkg_maker = ReflectedRegionsBackgroundMaker(exclusion_mask=exclusion_mask)
+                    safe_mask_maker = SafeMaskMaker(methods=["aeff-max"], aeff_percent=10)
+                    print("Reflected background method is applied")
+                    
+
+                    # create a counts map for visualisation later...
+                    counts = Map.create(skydir=self.source_pos, width=self.hla_width)
+                    datasets = Datasets()
+
+                    for obs_id, observation in zip(self.obs_ids, self.obs_collection):
+                        dataset = dataset_maker.run(dataset_empty.copy(name=str(obs_id)), observation)
+                        counts.fill_events(observation.events)
+                        dataset_on_off = bkg_maker.run(dataset, observation)
+                        dataset_on_off = safe_mask_maker.run(dataset_on_off, observation)
+                        if dataset_on_off.counts_off is not None: datasets.append(dataset_on_off)
+                    
+                    color_list = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf','b']
+                    len_run = len(self.obs_collection)
+                    len_col = len(color_list)
+                    if len_run>len_col:
+                        color_list = color_list * (int(len_run/len_col)+1)
+                    color_cycle = cycler('color', color_list)
+
+                    def func(x,a=1):
+                        return a*np.sqrt(x)
+                    
+                    plt.figure(figsize=(8, 8))
+                    ax = counts.plot()
+                    #ax.add_colorbar()
+                    on_geom.plot_region(ax=ax, kwargs_point={"color": "k", "marker": "*"})
+                    plot_spectrum_datasets_off_regions(ax=ax, datasets=datasets, prop_cycle=color_cycle)
+                    info_table = datasets.info_table(cumulative=True) 
+                    xdata=info_table["livetime"].to("h")
+                    ydata=info_table["sqrt_ts"]
+                    popt, pcov = curve_fit(func, xdata, ydata)
+
+                    fig, (ax_excess, ax_sqrt_ts) = plt.subplots(figsize=(10, 4), ncols=2, nrows=1)
+                    ax_excess.plot(
+                        info_table["livetime"].to("h"),
+                        info_table["excess"],
+                        marker="o",
+                        ls="none",
+                    )
+                    ax_excess.set_title("Cumulative Excess")
+                    ax_excess.set_xlabel("Livetime [h]")
+                    ax_excess.set_ylabel("Excess events")
+                    ax_excess.grid(True)
+                    ax_sqrt_ts.plot(
+                        info_table["livetime"].to("h"),
+                        info_table["sqrt_ts"],
+                        marker="o",
+                        ls="none",
+                    )
+
+                    ax_sqrt_ts.plot(xdata, func(xdata, *popt), 'r-',label='%5.2f x sqrt(livetime)'% tuple(popt))
+                    plt.legend()
+                    ax_sqrt_ts.grid(True)
+                    ax_sqrt_ts.set_title("Cumulative Sqrt(TS)")
+                    ax_sqrt_ts.set_xlabel("Livetime [h]")
+                    ax_sqrt_ts.set_ylabel("Sqrt(TS)")
+                    plt.show()
+                    
+                    if fit_method == 'stacked':
+                        dataset = Datasets(datasets).stack_reduce()
+                        dataset = safe_mask_maker.run(dataset)
+                    else:
+                        dataset = datasets.copy()
+                else:
+                    fig_save_path=f"{self.plots_dir_hla}/skymaps/skymap_irf_{self.method}_bkg_{bkg_method}_Eminmax_{emin.value:.0f}_{emax.value:.0f}_w_{(width[0]*map_width_factor):.1f}.png"
+                    self.plot_skymaps(bkg_method, map_width_factor=map_width_factor, unstacked_datasets=unstacked_datasets, bkg_on_stacked_dataset=True, fig_save_path=fig_save_path)
+                    energy_axis = self.stacked_dataset._geom.axes['energy']
+                    energy_edges = energy_axis.edges
+                    on_region = CircleSkyRegion(center=on_region_skydir, radius=on_region_radius)
+                    on_geom = RegionGeom(on_region, axes=[energy_axis])
+
+                    if fit_method == 'stacked':
+                        stacked_on_off = self.stacked_dataset.copy()
+                        geom = stacked_on_off._geom.copy()
+                        dataset = stacked_on_off.to_spectrum_dataset(on_region)
+                    else:
+                        unstacked_with_bkg_model = self.get_dataset(bkg_method=bkg_method, unstacked_datasets="stored",  bkg_on_stacked_dataset=False, return_stacked=False)
+                        dataset = Datasets()
+                        for dataset_on_off in unstacked_with_bkg_model:
+                            dataset_on_off = dataset_on_off.copy()
+                            dataset_on_off = dataset_on_off.to_spectrum_dataset(on_region)
+                            dataset.append(dataset_on_off)
+
+                model_name = f"{model_source_name} {i+1}"
+                if i == 0:
+                    model = model_source.copy(name=model_name)
+                else:
+                    fit_dict["name"] = model_name
+                    model = SkyModel.from_dict(fit_dict)
+                dataset.models = [model]
+                if i==0:
+                    dataset_fit = Fit()
+                    if fit_method == 'stacked': result_fit = dataset_fit.run([dataset])
+                    else: result_fit = dataset_fit.run(dataset)
+                    try:
+                        minuit = result_fit.optimize_result.minuit
+                        print(minuit)
+                        fit_success = True
+                    except:
+                        fit_success = False
+                    
+                    results[model_source_name][fit_method]={
+                                "fit_success" : fit_success,
+                                "fit_result" : result_fit,
+                                "models" : [model.copy(name=model_source_name)]
+                            }
+                # make a copy to compare later
+                model_best = model.copy(name=model_name)
+                if i==0:
+                    fit_dict = model_best.to_dict()
+                    print(fit_dict)
+
+                try:
+                    fpe = FluxPointsEstimator(
+                        energy_edges=energy_edges, source=model_name, selection_optional="all"
+                    )
+                    flux_points = fpe.run(datasets=dataset)
+
+
+                    results[model_source_name][fit_method][model_name] = {
+                            "flux_points_success" : True,
+                            "model" : model.copy(name=model_name),
+                            "flux_points" : flux_points
+                            }
+                except:
+                    results[model_source_name][fit_method][model_name] = {
+                            "flux_points_success" : False
+                            }
+                
+        self.results_1d = {
+            "skymaps" : self.skymaps_dict,
+            "bkg_method" : bkg_method,
+            "results" : results,
+        }
+        return self.results_1d

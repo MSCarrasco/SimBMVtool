@@ -338,7 +338,7 @@ class BaseSimBMVtoolCreator(ABC):
             
             all_obs_ids = self.dfobs_table.index.to_numpy()
             sources = self.dfobs_table.OBJECT.str.lower().str.replace(" ", "").to_numpy()
-            is_source = sources==self.source_name.lower().replace(" ", "")
+            is_source = [self.source_name.lower().replace(" ", "") in source for source in sources]
 
             if (len(self.all_sources) > 1) and (not from_index):
                 self.all_obs_ids = all_obs_ids[is_source]

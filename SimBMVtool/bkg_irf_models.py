@@ -2,6 +2,7 @@ import os.path
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '.'))
 
+from baccmod.modeling import bilinear_gaussian2d, gaussian2d
 import numpy as np
 import astropy.units as u
 from astropy.coordinates import SkyCoord,EarthLocation, angular_separation, position_angle,Angle
@@ -188,3 +189,33 @@ class GaussianSpatialModel_LinearGradient_half(SpatialModel):
         norm *=  (1 + lon_grad_factor) * (1 +lat_grad_factor ) 
         exponent = -0.5 * ((1 - np.cos(sep)) / a)
         return u.Quantity(norm * np.exp(exponent).value, "sr-1", copy=True)
+
+def gaussian1d(x, y, size, x_cm, y_cm, sigma):
+    return gaussian2d(x, y, size, x_cm, y_cm, sigma, sigma, 0)
+
+def center_suppressed_bilinear_gaussian2d(x, y, size, x_cm, y_cm, width, length,
+                                          psi, x_gradient, y_gradient, sup_ratio, sup_w):
+    bl2dgauss=bilinear_gaussian2d(x, y, size, x_cm, y_cm, width, length,
+                                          psi, x_gradient, y_gradient)
+    if sup_ratio==0:
+        return bl2dgauss
+    
+    supgauss=gaussian2d(x, y, size, 0, 0, sup_w, sup_w,0)
+    supgauss=sup_ratio*supgauss/np.max(supgauss)
+    out = bl2dgauss * (1-supgauss)
+    return out
+
+def center_suppressed2d_bilinear_gaussian2d(x, y, size, x_cm, y_cm, width, length,
+                                          psi, x_gradient, y_gradient, sup_ratio, sup_w, sup_l, sup_psi):
+    bl2dgauss=bilinear_gaussian2d(x, y, size, x_cm, y_cm, width, length,
+                                          psi, x_gradient, y_gradient)
+    #if sup_ratio<1e-10:
+    #    return bl2dgauss
+    
+    supgauss=gaussian2d(x, y, size, 0, 0, sup_w, sup_l,sup_psi)
+    supgauss=sup_ratio*supgauss/np.max(supgauss)
+    out = bl2dgauss * (1-supgauss)
+    out[out<=0] = np.min(out[out>0])/100
+    return out
+
+center_suppressed2d_bilinear_gaussian2d.name='center_boostsuppressed2d_bilinear_gaussian2d'
