@@ -254,13 +254,14 @@ class BMVCreator(BaseSimBMVtoolCreator):
         self.hla_width = self.cfg_hl_analysis['width']
         self.hla_bkg_maker = self.cfg_hl_analysis['bkg_maker']
         self.hla_fit_method = self.cfg_hl_analysis['hla_fit_method']
-        
+        self.hla_models_list = self.cfg_hl_analysis['models_list']
+        self.hla_str = f"Eminmax_{self.hla_e_min}_{self.hla_e_max}_nbinEperdec_{self.hla_nbin_E_per_decade}_offmax_{self.hla_offset_max}_w_{self.hla_width}_bkg_{'_'.join(self.hla_bkg_maker)}_fit_{self.hla_fit_method}"
+
         e_min, e_max = (self.hla_e_min*u.TeV, self.hla_e_max*u.TeV)
         nbin_E_per_decade = self.hla_nbin_E_per_decade
         offset_max_dataset = self.hla_offset_max * u.deg
         width = (self.hla_width,self.hla_width)
         self.axis_info_dataset = [e_min, e_max, nbin_E_per_decade, offset_max_dataset, width]
-        self.hla_str = f"Eminmax_{e_min}_{e_max}_nbinEperdec_{nbin_E_per_decade}_offmax_{offset_max_dataset}_w_{self.hla_width}_bkg_{'_'.join(self.hla_bkg_maker)}_fit_{self.hla_fit_method}"
 
         self.plots_dir_hla=f"{self.output_dir}/{self.subdir}/{self.method}/{self.end_name}/hla/{self.hla_str}/plots"
         self.data_dir_hla=f"{self.output_dir}/{self.subdir}/{self.method}/{self.end_name}/hla/{self.hla_str}/data"
