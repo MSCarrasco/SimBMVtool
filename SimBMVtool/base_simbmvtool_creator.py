@@ -148,7 +148,7 @@ class BaseSimBMVtoolCreator(ABC):
                 custom_source_dict["name"] = self.source_name
                 self.source_model = SkyModel.from_dict(custom_source_dict)
 
-        # Output backround model (Acceptance parameters are used to define oversampled true IRF)
+        # Output background model (Acceptance parameters are used to define oversampled true IRF)
         self.bkg_dim = self.cfg_acceptance["dimension"]
         self.fov_alignment=self.cfg_acceptance["FoV_alignment"]
         if "fov_rotation_error_limit" in list(self.cfg_acceptance.keys()):
@@ -171,7 +171,7 @@ class BaseSimBMVtoolCreator(ABC):
 
         self.radius_edges = np.linspace(0,np.sqrt(2 * self.size_fov_acc.value**2),10)
         self.radius_centers = self.radius_edges[:-1]+0.5*(self.radius_edges[1:]-self.radius_edges[:-1])
-        
+
         if self.simulator or not self.external_data:
             # True background model
             self.true_collection = self.cfg_acceptance["true_collection"]
@@ -270,21 +270,31 @@ class BaseSimBMVtoolCreator(ABC):
         if self.true_collection:
             self.bkg_true_irf_collection = {}
             self.bkg_true_down_irf_collection = {}
+            self.bkg_true_map_collection = {}
+            self.bkg_true_down_map_collection = {}
+            lat_grad_values = []
+            lon_grad_values = []
             tmp_config = self.config
             n_run_per_wobble = self.cfg_simulation["n_run"]
             n_third = n_run_per_wobble // 3
             for i_step in range(n_run_per_wobble):
-                if i_step < n_third: n_step = 0
-                else: n_step = 0.5 if i_step < 2*n_third else 1
+                if  self.cfg_simulation["linear_grad_evolution"]: n_step = i_step / n_run_per_wobble
+                else:
+                    if i_step < n_third: n_step = 0
+                    else: n_step = 0.5 if i_step < 2*n_third else 1
                 if self.lon_grad !=0:
                     self.lon_grad_step = np.diff(np.linspace(0,abs(self.lon_grad), round(n_run_per_wobble)))[0]
-                    lon_grad_new = np.round(n_step * n_run_per_wobble * self.lon_grad_step,1)
+                    # lon_grad_new = np.round(n_step * n_run_per_wobble * self.lon_grad_step,1)
+                    lon_grad_new = n_step * n_run_per_wobble * self.lon_grad_step
+                    lon_grad_values.append(lon_grad_new)
                     for param in tmp_config['background']['custom_source']['spatial']['parameters']:
                         if param['name'] == 'lon_grad':
                             param['value'] = lon_grad_new
                 if self.lat_grad !=0:
                     self.lat_grad_step = np.diff(np.linspace(0,abs(self.lat_grad), round(n_run_per_wobble)))[0]
-                    lat_grad_new = np.round(n_step * n_run_per_wobble * self.lat_grad_step,1)
+                    # lat_grad_new = np.round(n_step * n_run_per_wobble * self.lat_grad_step,1)
+                    lat_grad_new = n_step * n_run_per_wobble * self.lat_grad_step
+                    lat_grad_values.append(lat_grad_new)
                     for param in tmp_config['background']['custom_source']['spatial']['parameters']:
                         if param['name'] == 'lat_grad':
                             param['value'] = lat_grad_new
@@ -292,12 +302,20 @@ class BaseSimBMVtoolCreator(ABC):
                 if (i_step == 0) or  (i_step == n_run_per_wobble-1): plot,verbose=(False,True)
                 else: plot,verbose=(False,False)
 
-                bkg_true_irf, bkg_true_down_irf = get_bkg_true_irf_from_config(tmp_config,downsample=True,downsample_only=False,plot=plot,verbose=verbose)
+                bkg_true_irf, bkg_true_down_irf, bkg_true_map, bkg_true_down_map = get_bkg_true_irf_from_config(tmp_config,downsample=True,downsample_only=False,plot=plot,verbose=verbose, return_map=True)
                 for i_wobble in range(len(self.wobble_pointings)):
                     self.bkg_true_irf_collection[i_step + i_wobble*n_run_per_wobble] = bkg_true_irf
                     self.bkg_true_down_irf_collection[i_step + i_wobble*n_run_per_wobble] = bkg_true_down_irf
+                    self.bkg_true_map_collection[i_step + i_wobble*n_run_per_wobble] = bkg_true_map
+                    self.bkg_true_down_map_collection[i_step + i_wobble*n_run_per_wobble] = bkg_true_down_map
+            self.lon_lat_grad_values = [np.array(lon_grad_values), np.array(lat_grad_values)]
         else:
-            self.bkg_true_irf, self.bkg_true_down_irf = get_bkg_true_irf_from_config(self.config,downsample=True,downsample_only=False,plot=False,verbose=True)
+            self.bkg_true_irf, self.bkg_true_down_irf, self.bkg_true_map, self.bkg_true_down_map = get_bkg_true_irf_from_config(self.config,downsample=True,downsample_only=False,plot=False,verbose=True, return_map=True)
+            bkg_spatial_model_params = self.config['background']['custom_source']['spatial']['parameters']
+            lon_lat_grad_values = []
+            for param in bkg_spatial_model_params:
+                if (param['name'] == 'lon_grad') or (param['name'] == 'lat_grad'): lon_lat_grad_values.append(param['value'])
+            self.lon_lat_grad_values = np.array(lon_lat_grad_values)
             
     def get_background_irf(self, type='true', downsampled=True, i_irf=0) -> BackgroundIRF:
         if type=='true':
@@ -310,7 +328,141 @@ class BaseSimBMVtoolCreator(ABC):
         elif type=='output':
             if self.out_collection: return self.bkg_output_irf_collection[i_irf]
             else: return self.bkg_output_irf
+    
+    def get_2d_binned_stat_from_skymap(self, skymap, energy_offset_axes = [None,None]):
+        center_map = skymap._geom.center_skydir
+        energy_axis, offset_axis = energy_offset_axes
+        if energy_axis is None: energy_axis = self.energy_axis_acceptance
+        if offset_axis is None: offset_axis = self.offset_axis_acceptance
+        data = np.zeros((energy_axis.nbin, offset_axis.nbin))
+        for i in range(offset_axis.nbin):
+            if np.isclose(0. * u.deg, offset_axis.edges[i]):
+                selection_region = CircleSkyRegion(center=center_map, radius=offset_axis.edges[i + 1])
+            else:
+                selection_region = CircleAnnulusSkyRegion(center=center_map,
+                                                            inner_radius=offset_axis.edges[i],
+                                                            outer_radius=offset_axis.edges[i + 1])
+            selection_map = skymap.geom.to_image().region_mask([selection_region])
+            for j in range(energy_axis.nbin):
+                value = u.dimensionless_unscaled * np.sum(skymap.data[j, :, :] * selection_map)
+                data[j, i] = value
+        return data
 
+    def get_dfbkg_stat(self, i_irf_arr=None, bkg_map_arr=None, return_df=True, by_grad=False, n_run=1):
+        """
+        Compute background statistics per energy bin, optionally by gradient.
+        
+        Parameters
+        ----------
+        bkg_map_arr : np.ndarray, optional
+            Precomputed array of background maps (IRF x Ebin x pixels). If None, it is built from self.bkg_true_down_map_collection.
+        i_irf_arr : list or np.ndarray, optional
+            Indices of IRFs to include. If None, use all.
+        return_df : bool
+            Whether to return the DataFrame.
+        by_grad : bool
+            If True, compute statistics per spatial gradient.
+        """
+
+        # Prepare bkg_map_arr
+        if bkg_map_arr is None:
+            try: bkg_map_collection = deepcopy(self.bkg_true_down_map_collection)
+            except:
+                bkg_map_collection = [deepcopy(self.bkg_true_down_map)]
+                bkg_map_collection[0].data *= n_run
+            i_map_arr = np.arange(len(bkg_map_collection)) if i_irf_arr is None else i_irf_arr
+            if self.bkg_dim == 3:
+                bkg_map_arr = [bkg_map_collection[i].data for i in i_map_arr]
+            else:
+                bkg_map_arr = []
+                for i in i_map_arr: bkg_map_arr.append(self.get_2d_binned_stat_from_skymap(bkg_map_collection[i]))
+        else:
+            i_map_arr = np.arange(bkg_map_arr.shape[0]) if i_irf_arr is None else i_irf_arr
+            bkg_map_arr = bkg_map_arr[i_map_arr]
+        
+        i_map_arr = np.array(i_map_arr, dtype=int)
+        bkg_map_arr = np.array(bkg_map_arr)
+        
+        try:
+            n_irf, n_Ebin, n_pixel_i, n_pixel_j = bkg_map_arr.shape
+            n_pixel = n_pixel_i * n_pixel_j
+        except:
+            n_irf, n_Ebin, n_pixel = bkg_map_arr.shape
+
+        interval_index = pd.IntervalIndex.from_breaks(
+            self.energy_axis_acceptance.edges.to_value(u.TeV).round(4)
+        )
+
+        # Prepare gradient values if needed
+        if by_grad:
+            lon_grad_values_all = pd.Series(np.concatenate((np.array(self.lon_lat_grad_values[0]),np.array(self.lon_lat_grad_values[0]))).round(1))
+            lat_grad_values_all = pd.Series(np.concatenate((np.array(self.lon_lat_grad_values[1]),np.array(self.lon_lat_grad_values[1]))).round(1))
+            # Select only the IRFs requested
+            lon_grad_values = lon_grad_values_all[lon_grad_values_all.index.isin(i_map_arr)].to_numpy()
+            lat_grad_values = lat_grad_values_all[lat_grad_values_all.index.isin(i_map_arr)].to_numpy()
+
+            cfg_grad = self.cfg_background['spatial_model_gradient']
+            values = [[], lat_grad_values, lon_grad_values, np.concatenate((lon_grad_values, lat_grad_values))]
+            idx_grad = int(cfg_grad["lon_grad_variation"]) * 2 + int(cfg_grad["lat_grad_variation"])
+            grad_values_unique = np.unique(values[idx_grad])
+
+            # Build MultiIndex
+            index = pd.MultiIndex.from_product(
+                [interval_index, grad_values_unique, np.arange(n_pixel)],
+                names=["Ebin", "grad", "i_pixel"]
+            )
+        else:
+            index = pd.MultiIndex.from_product(
+                [interval_index, np.arange(n_pixel)],
+                names=["Ebin", "i_pixel"]
+            )
+
+        # Initialize DataFrame
+        dfbkg_stat = pd.DataFrame(index=index, columns=["count"])
+        dfbkg_stat["count"] = 0.0
+
+        # Build per-IRF DataFrames and concatenate
+        df_list = []
+        for idx_map, i_irf in enumerate(i_map_arr):
+            data_map = bkg_map_arr[idx_map]
+
+            if by_grad:
+                # Per IRF, select corresponding grad value
+                grad_val = values[idx_grad][idx_map]
+                idxs = pd.MultiIndex.from_product(
+                    [interval_index, [grad_val], np.arange(n_pixel)],
+                    names=["Ebin", "grad", "i_pixel"]
+                )
+            else:
+                idxs = pd.MultiIndex.from_product(
+                    [interval_index, np.arange(n_pixel)],
+                    names=["Ebin", "i_pixel"]
+                )
+
+            df_tmp = pd.DataFrame(
+                data = data_map.reshape(n_Ebin * n_pixel),
+                index = idxs,
+                columns=[f"count_{i_irf}"]
+            )
+
+            df_list.append(df_tmp)
+
+        # Concatenate all IRF columns at once
+        dfbkg_stat = pd.concat([dfbkg_stat] + df_list, axis=1)
+
+        # Compute total count across IRFs
+        dfbkg_stat["count"] = dfbkg_stat[[col for col in dfbkg_stat.columns if col.startswith("count_")]].sum(axis=1)
+
+        self.dfbkg_stat = deepcopy(dfbkg_stat)
+
+        if by_grad:
+            display(dfbkg_stat.groupby(by=["Ebin","grad"]).describe()["count"].T)
+        else:
+            display(dfbkg_stat.groupby(by=["Ebin"]).describe()["count"].T)
+
+        if return_df:
+            return dfbkg_stat
+    
     def load_observation_collection(self, config_path=None, from_index=False, verbose=True) -> None:
         if config_path is not None: self.init_config(config_path)
         

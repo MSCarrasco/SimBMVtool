@@ -28,13 +28,9 @@ def evaluate_bkg(bkg_dim,bkg_model,energy_axis,offset_axis):
     ecenters = energy_axis.center.to_value(u.TeV)
     centers = offset_axis.center.to_value(u.deg)
 
-    if bkg_dim==2:
-        E,offset = np.meshgrid(ecenters, centers, indexing='ij')
-        return bkg_model.evaluate(E*u.TeV,offset*u.deg,offset*u.deg)
-    elif bkg_dim == 3:
-        centers = np.concatenate((-np.flip(centers), centers), axis=None)
-        E, y, x = np.meshgrid(ecenters, centers, centers, indexing='ij')
-        return bkg_model.evaluate(E*u.TeV,x*u.deg,y*u.deg)
+    centers = np.concatenate((-np.flip(centers), centers), axis=None)
+    E, y, x = np.meshgrid(ecenters, centers, centers, indexing='ij')
+    return bkg_model.evaluate(E*u.TeV,x*u.deg,y*u.deg)
 
 def get_bkg_irf(bkg_map, n_bins_map, energy_axis, offset_axis, bkg_dim, livetime=1*u.s, stacked=False, FoV_alignment='ALTAZ'):
     '''Transform a background map into a background IRF'''
@@ -53,53 +49,28 @@ def get_bkg_irf(bkg_map, n_bins_map, energy_axis, offset_axis, bkg_dim, livetime
     geom_irf = WcsGeom.create(skydir=center_map, npix=(n_bins_map, n_bins_map),
                                 binsz=spatial_bin_size, frame="icrs", axes=[energy_axis])
     
-    if bkg_dim==2:
-        if is_WcsNDMap:
-            data_background = np.zeros((energy_axis.nbin, offset_axis.nbin)) * u.Unit('s-1 MeV-1 sr-1')
-            down_factor = bkg_map.data.shape[1]/data_background.shape[1]
-            bkg_map = bkg_map.downsample(factor=down_factor, preserve_counts=True).data
-            for i in range(offset_axis.nbin):
-                if np.isclose(0. * u.deg, offset_axis.edges[i]):
-                    selection_region = CircleSkyRegion(center=center_map, radius=offset_axis.edges[i + 1])
-                else:
-                    selection_region = CircleAnnulusSkyRegion(center=center_map,
-                                                                inner_radius=offset_axis.edges[i],
-                                                                outer_radius=offset_axis.edges[i + 1])
-                selection_map = geom_irf.to_image().to_cube([energy_axis.squash()]).region_mask([selection_region])
-                for j in range(energy_axis.nbin):
-                    value = u.dimensionless_unscaled * np.sum(bkg_map[j, :, :] * selection_map)
+    edges = offset_axis.edges
+    extended_edges = np.concatenate((-np.flip(edges), edges[1:]), axis=None)
+    extended_offset_axis_x = MapAxis.from_edges(extended_edges, name='fov_lon')
+    bin_width_x = np.repeat(extended_offset_axis_x.bin_width[:, np.newaxis], n_bins_map, axis=1)
+    extended_offset_axis_y = MapAxis.from_edges(extended_edges,  name='fov_lat')
+    bin_width_y = np.repeat(extended_offset_axis_y.bin_width[np.newaxis, :], n_bins_map, axis=0)
 
-                    value /= (energy_axis.edges[j + 1] - energy_axis.edges[j])
-                    value /= 2. * np.pi * (np.cos(offset_axis.edges[i]) - np.cos(offset_axis.edges[i+1])) * u.steradian
-                    value /= livetime
-                    data_background[j, i] = value
-        else: data_background = bkg_map
-        bkg_irf = Background2D(axes=[energy_axis, offset_axis],
-                                        data=data_background.to(u.Unit('s-1 MeV-1 sr-1')),fov_alignment=fov_alignment)
+    if is_WcsNDMap:
+        solid_angle = 4. * (np.sin(bin_width_x / 2.) * np.sin(bin_width_y / 2.)) * u.steradian
+        down_factor = bkg_map.data.shape[1]/solid_angle.shape[1]
+        bkg_map = bkg_map.downsample(factor=down_factor, preserve_counts=True).data
 
-    elif bkg_dim==3:
-        edges = offset_axis.edges
-        extended_edges = np.concatenate((-np.flip(edges), edges[1:]), axis=None)
-        extended_offset_axis_x = MapAxis.from_edges(extended_edges, name='fov_lon')
-        bin_width_x = np.repeat(extended_offset_axis_x.bin_width[:, np.newaxis], n_bins_map, axis=1)
-        extended_offset_axis_y = MapAxis.from_edges(extended_edges,  name='fov_lat')
-        bin_width_y = np.repeat(extended_offset_axis_y.bin_width[np.newaxis, :], n_bins_map, axis=0)
-
-        if is_WcsNDMap:
-            solid_angle = 4. * (np.sin(bin_width_x / 2.) * np.sin(bin_width_y / 2.)) * u.steradian
-            down_factor = bkg_map.data.shape[1]/solid_angle.shape[1]
-            bkg_map = bkg_map.downsample(factor=down_factor, preserve_counts=True).data
-
-            if not stacked:
-                data_background = bkg_map / solid_angle[np.newaxis, :, :] / energy_axis.bin_width[:, np.newaxis,
-                                                                                    np.newaxis] / livetime
-            else:
-                data_background = bkg_map / u.steradian / energy_axis.unit / u.s
-        else: data_background = bkg_map
-        bkg_irf = Background3D(axes=[energy_axis, extended_offset_axis_x, extended_offset_axis_y],
-                                    data=data_background.to(u.Unit('s-1 MeV-1 sr-1')),
-                                    fov_alignment=fov_alignment)
-    return bkg_irf
+        if not stacked:
+            data_background = bkg_map / solid_angle[np.newaxis, :, :] / energy_axis.bin_width[:, np.newaxis,
+                                                                                np.newaxis] / livetime
+        else:
+            data_background = bkg_map / u.steradian / energy_axis.unit / u.s
+    else: data_background = bkg_map
+    bkg_irf = Background3D(axes=[energy_axis, extended_offset_axis_x, extended_offset_axis_y],
+                                data=data_background.to(u.Unit('s-1 MeV-1 sr-1')),
+                                fov_alignment=fov_alignment)
+    return bkg_irf if bkg_dim == 3 else bkg_irf.to_2d()
 
 def get_irf_map(irf_rates, irf_axes, livetime):
     irf_energy_axis, irf_offset_axis = irf_axes
@@ -133,21 +104,21 @@ def get_cut_downsampled_irf_from_map(irf_map, irf_down_axes, cut_down_factors, b
         
         if plot:
             fig, ax = plt.subplots(figsize = (6,6))
-            irf_cut_map.sum_over_axes(['energy']).plot(ax=ax)
+            irf_cut_map.sum_over_axes(['energy']).plot(ax=ax, cbar=True)
     else: irf_down_map = irf_map.copy()
 
     irf_down_map = irf_down_map.downsample(factor=downsample_factor).downsample(factor=downsample_factor,axis_name='energy')
 
     if plot:
         fig, ax = plt.subplots(figsize = (6,6))
-        irf_down_map.sum_over_axes(['energy']).plot(ax=ax)
+        irf_down_map.sum_over_axes(['energy']).plot(ax=ax, cbar=True)
     
     bkg_irf_down = get_bkg_irf(irf_down_map, 2*irf_down_offset_axis.nbin, irf_down_energy_axis, irf_down_offset_axis, bkg_dim,livetime,FoV_alignment=FoV_alignment)
     if verbose:
         print(f"irf_map: {irf_map.data.shape}\nirf_cut_map: {irf_cut_map.data.shape}\nirf_down_map: {irf_down_map.data.shape}")
     return irf_down_map, bkg_irf_down
 
-def get_bkg_true_irf_from_config(config, downsample=True, downsample_only=True, plot=False, verbose=False):
+def get_bkg_true_irf_from_config(config, downsample=True, downsample_only=True, plot=False, verbose=False, return_map=False):
     cfg_paths = config["paths"]
 
     cfg_simulation = config["simulation"]
@@ -200,12 +171,16 @@ def get_bkg_true_irf_from_config(config, downsample=True, downsample_only=True, 
     bkg_true_rates = evaluate_bkg(bkg_dim,bkg_true_model,energy_axis_irf,offset_axis_irf)
     bkg_true_irf = get_bkg_irf(bkg_true_rates, 2*nbin_offset_irf, energy_axis_irf, offset_axis_irf, bkg_dim, FoV_alignment=cfg_acceptance["FoV_alignment"])
     
-    if not downsample: 
+    if not downsample:
         return bkg_true_irf
     else:
         bkg_true_map = get_irf_map(bkg_true_rates,[energy_axis_irf,offset_axis_irf],n_run*livetime_simu)
-        _, bkg_true_down_irf = get_cut_downsampled_irf_from_map(bkg_true_map,[energy_axis_acceptance,offset_axis_acceptance], [offset_factor, down_factor], bkg_dim, n_run * livetime_simu, plot=plot, verbose=verbose,FoV_alignment=cfg_acceptance["FoV_alignment"])
-        if downsample_only: 
-            return bkg_true_down_irf
-        else: 
-            return bkg_true_irf, bkg_true_down_irf
+        bkg_true_down_map, bkg_true_down_irf = get_cut_downsampled_irf_from_map(bkg_true_map,[energy_axis_acceptance,offset_axis_acceptance], [offset_factor, down_factor], bkg_dim, n_run * livetime_simu, plot=plot, verbose=verbose,FoV_alignment=cfg_acceptance["FoV_alignment"])
+        bkg_true_map.data /= n_run
+        bkg_true_down_map.data /= n_run
+        if downsample_only:
+            if return_map: return bkg_true_down_irf, bkg_true_down_map
+            else: return bkg_true_down_irf
+        else:
+            if return_map: return bkg_true_irf, bkg_true_down_irf, bkg_true_map, bkg_true_down_map
+            else: return bkg_true_irf, bkg_true_down_irf

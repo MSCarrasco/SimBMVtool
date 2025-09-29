@@ -57,36 +57,49 @@ crab:
         color: "black"
         yunits: "TeV cm-2 s-1"
     custom:
-        crab-extended:
-            models:
-                spectral:
-                    type: ExpCutoffPowerLawSpectralModel
-                    parameters: [{'name': 'index',
-                                    'value': 2.390000104904175,
-                                    'error': 0.029999999329447746},
-                                {'name': 'amplitude',
-                                    'value': 3.759999950281312e-11,
-                                    'unit': 'TeV-1 s-1 cm-2',
-                                    'error': 7.000000080449598e-13},
-                                {'name': 'reference', 'value': 1.0, 'unit': 'TeV'},
-                                {'name': 'lambda_',
-                                    'value': 0.0699300691485405,
-                                    'unit': 'TeV-1',
-                                    'error': 0.010269450023770332},
-                                {'name': 'alpha', 'value': 1.0}]
-                spatial:
-                    type: Disk
-                    parameters: [{'name': 'lon_0',
-                                        'value': 83.63308,
-                                        'unit': 'deg'},
-                                    {'name': 'lat_0',
-                                        'value':  22.0145,
-                                        'unit': 'deg'},
-                                    {'name': 'frame', 
-                                        'value': 'icrs'}]
+        crab-extended-faint:
+            spectral: # Power law, Exponential PL
+                type: ExpCutoffPowerLawSpectralModel
+                parameters: [{'name': 'index',
+                                'value': 2.3900,
+                                'error': 3.000e-02},
+                            {'name': 'amplitude',
+                                'value': 3.7600e-14,
+                                'unit': 'TeV-1 s-1 cm-2',
+                                'error': 7.000e-16},
+                            {'name': 'lambda_',
+                                'value': 6.9930e-02,
+                                'unit': 'TeV-1',
+                                'error': 1.027e-02},
+                            {'name': 'alpha',
+                                'value': 1.0000,
+                                'error': 0.0000},
+                            {'name': 'reference',
+                                'value': 1.0,
+                                'unit': 'TeV'}]
+            spatial:  # Disk, Gaussian
+            type: DiskSpatialModel
+            parameters: [{'name': 'lon_0',
+                                'value': 83.63308,
+                                'unit': 'deg'},
+                            {'name': 'lat_0',
+                                'value':  22.0145,
+                                'unit': 'deg'},
+                            {'name': 'r_0',
+                                'value': 0.25,
+                                'unit': 'deg'},
+                            {'name': 'phi',
+                                'value': 0,
+                                'unit': 'deg'},
+                            {'name': 'edge_width',
+                                'value': 0.01},
+                            {'name': 'e', 
+                                'value': 0},
+                            {'name': 'frame', 
+                                'value': icrs}]
             plot_kwargs:
-                label: "LST-1 (2023)"
-                energy_bounds: [0.05,30]
+                label: "Crab extended (faint)"
+                energy_bounds: [0.05,10]
                 energy_bounds_unit: "TeV"
                 sed_type: "e2dnde"
                 color: "black"

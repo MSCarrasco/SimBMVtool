@@ -44,8 +44,11 @@ from gammapy.modeling.models import (
 from gammapy.catalog import SourceCatalogGammaCat
 
 from scipy.special import erfcinv, erfinv
-from scipy.stats import chi2
+from scipy.stats import chi2, mode
 from scipy.stats import norm as norm_stats
+from scipy.optimize import curve_fit
+from math import sqrt
+
 from gammapy.stats import CashCountsStatistic
 from gammapy.modeling import Parameter, Parameters
 
@@ -376,7 +379,7 @@ def get_regions_from_dict(regions_dict:dict):
         if iregion < n_regions - 1: regions_ds9 += ";"
     return Regions.parse(regions_ds9, format="ds9")
 
-def get_geom(Bkg_irf, axis_info, pointing_radec):
+def get_geom(Bkg_irf, axis_info=None, pointing_radec=None):
     '''Return geom from bkg_irf axis or a set of given axis edges'''
     
     if axis_info is not None: 
@@ -426,7 +429,11 @@ def get_lima_maps(stacked_dataset, correlation_radius, correlate_off, estimator=
                                         kernel_width=correlation_radius * u.deg,
                                         energy_edges=stacked_dataset._geom.axes['energy'].bounds,
                                     )
-    lima_maps = map_estimator.run(stacked_dataset)
+    try: lima_maps = map_estimator.run(stacked_dataset)
+    except:
+        stacked_dataset=stacked_dataset.to_map_dataset()
+        stacked_dataset.model = model_source
+        lima_maps = map_estimator.run(stacked_dataset)
     return lima_maps
 
 def get_dataset_maps_dict(dataset, results=['counts','background']):
@@ -560,6 +567,77 @@ def plot_skymap_from_dict(skymaps, key, crop_width=0 * u.deg, ring_bkg_param=Non
     plt.tight_layout()
     plt.show()
 
+def plot_significance_residuals(xlabel, lima_maps, title="", figsize=(11, 5), fontsize=15, stat='density', n_bins=30, n_sigma=3, width_left = 1.8, cutout_width=1.7*u.deg, save_plot=False, return_minmax=True):
+    skymap = lima_maps["sqrt_ts"].cutout(lima_maps["sqrt_ts"]._geom.center_skydir, cutout_width)
+    
+    fig, (ax1,ax) = plt.subplots(1, 2, figsize=figsize, gridspec_kw={'width_ratios': [width_left, 3-width_left]})
+    fig.delaxes(ax1)
+    ax1 = fig.add_axes([0.1, 0.1, 0.8*width_left/3, 0.8], projection=skymap.geom.wcs)
+    skymap.plot(cmap="coolwarm", add_cbar=True, vmin=-5, vmax=5, ax=ax1)
+    ax1.set_title(label='Significance residuals ', fontsize=fontsize-1)
+    residuals_distrib = lima_maps["sqrt_ts"].data.flatten()
+    distribution = residuals_distrib[~np.isnan(residuals_distrib) & (residuals_distrib != 0)]
+    
+    # Compute histogram
+    hist, bin_edges = np.histogram(distribution, bins=n_bins, density=True)  # density=True scales the histogram to density
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+    
+    # Initial guesses for parameters [A, mu, sigma]
+    p0 = [hist.max(), np.mean(distribution), np.std(distribution)]
+    
+    # Fit the Gaussian to the histogram
+    popt, pcov = curve_fit(gauss, bin_centers, hist, p0=p0)
+    psigma = np.sqrt(np.diag(pcov))
+    
+    # Extract parameters from the fit
+    A = popt[0]
+    mu = popt[1]
+    sigma = np.sqrt(popt[2] ** 2)
+
+    # Generate Gaussian fit data
+    xdata = np.linspace(bin_edges.min(), bin_edges.max(), 1000)  # Higher resolution for plotting
+    y_gauss = gauss(xdata, *popt)  # Compute Gaussian values
+    
+    # Normalize Gaussian fit to match histogram area
+    norm_factor = np.trapz(hist, bin_centers)  # Calculate area under the histogram (integral)
+    y_gauss *= norm_factor  # Scale Gaussian fit to match area under the histogram
+    
+    # Define the range for containment based on the number of sigmas
+    min_val = mu - n_sigma * sigma
+    max_val = mu + n_sigma * sigma
+
+    # Plotting
+    # fig, ax = plt.subplots(figsize=(4, 4))
+    
+    # Plot the standard normal distribution for comparison
+    xdata_norm = np.linspace(bin_edges.min(), bin_edges.max(), 1000)
+    y_gauss_norm = norm_stats.pdf(xdata_norm)  # Standard normal distribution
+    ax.plot(xdata_norm, y_gauss_norm, color='midnightblue', ls='--', label="Standard normal distribution")
+    
+    # Plot the Gaussian fit to the histogram
+    ax.plot(xdata, y_gauss, color='crimson', label=f"Best-fit normal distribution\n$\mu$={mu:.2f}, $\sigma$={sigma:.2f}")
+    
+    # Plot the histogram
+    sns.histplot(x=distribution, bins=n_bins, ax=ax, element='step', fill=False, stat=stat, color='cornflowerblue', label='Distribution')
+    
+    # Set plot labels and title
+    ax.set_xlabel(xlabel=xlabel, fontsize=fontsize-2)
+    ax.set_ylabel(ylabel=stat.capitalize(), fontsize=fontsize-2)
+    
+    ax.legend(loc='upper center', frameon=False, fontsize=fontsize-1)
+    ax.set(ylim=[0, 0.6])
+    ax.set_title(label='Fitted distribution', fontsize=fontsize-1)
+    plt.suptitle(t=title, fontsize=fontsize)
+    # Save plot if needed
+    if save_plot:
+        fig.savefig(f'/gaussfit_{xlabel}.png')
+    
+    # Show the plot
+    plt.tight_layout()
+    plt.show()
+    
+    if return_minmax: return min_val, max_val
+
 #-------------------------------------------------------------------------------------
 # Model validation
 #-------------------------------------------------------------------------------------
@@ -641,12 +719,16 @@ def get_value_at_threshold(data_to_bin,weights,threshold_percent,plot=False):
         plt.show()
     return data_value_at_thr
 
-def compute_residuals(out, true, residuals='diff/true',res_lim_for_nan=1.) -> np.array:
+def compute_residuals(out, true, residuals='diff/true',res_lim_for_nan=1., norm_factor=1, dfobs_stat=None) -> np.array:
     res_arr = np.zeros_like(true)
+    
     for iEbin in range(true.shape[0]):
+        count_tot = dfobs_stat["count"].to_numpy()[iEbin] if dfobs_stat is not None else norm_factor
+        flux_tot = np.nansum(true[iEbin,:,:].flatten()) if dfobs_stat is not None else 1
         diff = out[iEbin,:,:] - true[iEbin,:,:]
         true[iEbin,:,:][true[iEbin,:,:] == 0.0] = np.nan
         res = diff / true[iEbin,:,:]
+        N = count_tot / flux_tot
         diff[np.abs(res) >= res_lim_for_nan] = np.nan # Limit to mask bins with "almost zero" statistics for truth model and 0 output count
         # Caveat: this will also mask very large bias, but the pattern should be visibly different
 
@@ -656,513 +738,103 @@ def compute_residuals(out, true, residuals='diff/true',res_lim_for_nan=1.) -> np
         elif residuals == "diff/sqrt(out)": res = diff / np.sqrt(out[iEbin,:,:])
 
         # res[true[iEbin,:,:] == 0] = np.nan
-        res_arr[iEbin,:,:] += res
+        res_arr[iEbin,:,:] += res * np.sqrt(N)
     return res_arr
+
+def distance(x, y, x0, y0):
+    """
+    Return distance between point
+    P[x0,y0] and a curve (x,y)
+    """
+    d_x = x - x0
+    d_y = y - y0
+    dis = np.sqrt( d_x**2 + d_y**2 )
+    return dis
+
+def min_distance(x, y, P, precision=30):
+    """
+    Compute minimum/a distance/s between
+    a point P[x0,y0] and a curve (x,y)
+    rounded at `precision`.
+    
+    ARGS:
+        x, y      (array)
+        P         (tuple)
+        precision (int)
+        
+    Returns min indexes and distances array.
+    """
+    # compute distance
+    d = distance(x, y, P[0], P[1])
+    d = np.round(d, precision)
+    # find the minima
+    glob_min_idxs = np.argwhere(d==np.min(d)).ravel()
+    sign = []
+    for idx in glob_min_idxs:
+        sign.append(np.sign(P[1] - y[idx]))
+    return glob_min_idxs, sign, d
+
+def linear_func(x, a, b):
+        return a * x + b
+
+def gauss(x, A, mu, sigma):
+    return A*np.exp(-(x-mu)**2/(2.*sigma**2))
+
+def get_gaussian_containment(xlabel,distribution,bins=30,n_sigma=1,weight_hist=1,  ax=None,save_plot=True, plot=True):
+    # p0 is the initial guess for the fitting coefficients (A, mu and sigma above)
+    hist, bin_edges = np.histogram(distribution,bins)
+    # p0 = [hist.max(), np.mean(distribution), np.std(distribution)]
+    p0 = [hist.max(), mode(np.round(distribution,3),keepdims=False,nan_policy='omit')[0], np.std(distribution)]
+    bin_centers = (bin_edges[:-1] + bin_edges[1:])/2
+    try:
+        popt, pcov = curve_fit(gauss, bin_centers, hist, p0=p0)
+        psigma = np.sqrt(np.diag(pcov))
+        print(popt,psigma)
+
+        xdata = np.linspace(bin_edges.min(),bin_edges.max(),100)
+        y_gauss = gauss(xdata,*popt)
+
+        min = popt[1]-n_sigma*sqrt(popt[2]**2)
+        max = popt[1]+n_sigma*sqrt(popt[2]**2)
+
+        if plot:
+            if ax is None: fig,ax=plt.subplots(figsize=(5,5))
+            ax.fill_betweenx(y=[0,np.max([y_gauss.max(),hist.max()])],x1=min,x2=max,color='g',alpha=0.1,label=f'$\pm${n_sigma}$\sigma$')
+            sns.histplot(x=distribution,bins=bins,ax=ax, element='step',weights=weight_hist)
+            ax.plot(xdata,y_gauss,color='r')
+            ax.set(xlabel=xlabel)
+            ax.legend(loc='best')
+        # if save_plot: fig.savefig(f'{save_path_plots}/gaussfit_{xlabel}')
+
+        return min, max, sqrt(popt[2]**2)
+    except:
+        return np.nan,np.nan, np.nan
+
+def calculate_pcc(true, pred, mask=None):
+    if mask is None:
+        mask = (~np.isnan(true)) & (~np.isnan(pred))
+    else:
+        mask = mask & (~np.isnan(true)) & (~np.isnan(pred))
+    if np.sum(mask) == 0:
+        return np.nan
+    return pearsonr(true[mask], pred[mask])[0]
+
+def calculate_nrmse(true, pred, mask=None):
+    if mask is None:
+        mask = (~np.isnan(true)) & (~np.isnan(pred))
+    else:
+        mask = mask & (~np.isnan(true)) & (~np.isnan(pred))
+    if np.sum(mask) == 0:
+        return np.nan
+    mse = np.mean((true[mask] - pred[mask])**2)
+    rmse = np.sqrt(mse)
+    norm = np.mean(true[mask])
+    return rmse / norm
 
 #-------------------------------------------------------------------------------------
 # High level analysis
 #-------------------------------------------------------------------------------------
 
-def sigma_to_ts(sigma, df=1):
-    """Convert sigma to delta ts"""
-    p_value = 2 * norm_stats.sf(sigma)
-    return chi2.isf(p_value, df=df)
-
-def ts_to_sigma(ts, df=1):
-    """Convert delta ts to sigma"""
-    p_value = chi2.sf(ts, df=df)
-    return norm_stats.isf(0.5 * p_value)
-
-def is_nested_model(null,alt):
-    null_free_params = pd.Series(null.parameters.free_parameters.to_table()['name'])
-    alt_free_params = pd.Series(alt.parameters.free_parameters.to_table()['name'])
-    if 'alpha' in null_free_params.values: null_free_params.loc[null_free_params == 'alpha'] = 'index'
-    if 'alpha' in alt_free_params.values: alt_free_params.loc[alt_free_params == 'alpha'] = 'index'
-    return null_free_params.isin(alt_free_params).all()
-
-def get_nested_model_wilk_significance(fitted_null_model, fitted_alternative_model, return_dof=True):
-    D = fitted_null_model.total_stat - fitted_alternative_model.total_stat
-    null_free_parameters = pd.Series(fitted_null_model.parameters.free_parameters.to_table()['name'])
-    alt_free_parameters = pd.Series(fitted_alternative_model.parameters.free_parameters.to_table()['name'])
-    is_nested = is_nested_model(fitted_null_model, fitted_alternative_model)
-    if is_nested:
-        delta_dof = len(alt_free_parameters) - len(null_free_parameters)
-        wilk_sig = ts_to_sigma(D, delta_dof)
-        if return_dof: return wilk_sig, delta_dof
-        else: return wilk_sig
-    else:
-        if return_dof: return -1, -1
-        else: return -1
-
-def get_dfmodels_wilk(results:dict, bkg_method='ring', fit_method='stacked'):
-    models_list = list(results[bkg_method]['results'].keys())
-    dfmodels_0 = pd.DataFrame(index=pd.Index(models_list, name='null_model'), columns=pd.Index(models_list, name='alt_model'))
-    dfmodels_wilk = dfmodels_0.copy()
-
-    for null_model, alt_model in product(models_list, models_list):
-        fitted_null = results[bkg_method]['results'][null_model][fit_method]
-        fitted_alt = results[bkg_method]['results'][alt_model][fit_method]
-        fit_fail = (("fit_success" in fitted_null.keys()) and not fitted_null["fit_success"]) or (("fit_success" in fitted_alt.keys()) and not fitted_alt["fit_success"])
-        if fit_fail:
-            dfmodels_wilk.loc[null_model, alt_model] = -1
-            continue
-        
-        null_tail, null_head = null_model.split(' - ')
-        alt_tail, alt_head = alt_model.split(' - ')
-
-        if null_head == 'No source': is_nested_head = True
-        elif alt_head == 'No source': is_nested_head = False
-        else:
-            is_nested_head = is_nested_model(fitted_null['models'][null_head + ' head'],fitted_alt['models'][alt_head + ' head'])
-        
-        if null_tail == 'No source': is_nested_tail = True
-        elif alt_tail == 'No source': is_nested_tail = False
-        else:
-            is_nested_tail = is_nested_model(fitted_null['models'][null_tail + ' tail'],fitted_alt['models'][alt_tail + ' tail'])
-
-        if is_nested_head and is_nested_tail:
-            dfmodels_wilk.loc[null_model, alt_model] = get_nested_model_wilk_significance(fitted_null['fit_result'], fitted_alt['fit_result'])
-    return dfmodels_wilk
-
-def get_dfmodels_wilk_dof(results:dict, bkg_method='ring', fit_method='stacked'):
-    models_list = list(results[bkg_method]['results'].keys())
-    dfmodels_0 = pd.DataFrame(index=pd.Index(models_list, name='null_model'), columns=pd.MultiIndex.from_product([["wilk","delta_dof"],models_list], names=['stat','alt_model']))
-    dfmodels_wilk_dof = dfmodels_0.copy()
-
-    for null_model, alt_model in product(models_list, models_list):
-        fitted_null = results[bkg_method]['results'][null_model][fit_method]
-        fitted_alt = results[bkg_method]['results'][alt_model][fit_method]
-        fit_fail = (("fit_success" in fitted_null.keys()) and not fitted_null["fit_success"]) or (("fit_success" in fitted_alt.keys()) and not fitted_alt["fit_success"])
-        if fit_fail:
-            dfmodels_wilk_dof.loc[null_model, ("wilk", alt_model)] = -1
-            continue
-        null_tail, null_head = null_model.split(' - ')[:2]
-        alt_tail, alt_head = alt_model.split(' - ')[:2]
-
-        if null_head == 'No source': is_nested_head = True
-        elif alt_head == 'No source': is_nested_head = False
-        else:
-            is_nested_head = is_nested_model(fitted_null['models'][null_head + ' head'],fitted_alt['models'][alt_head + ' head'])
-        
-        if null_tail == 'No source': is_nested_tail = True
-        elif alt_tail == 'No source': is_nested_tail = False
-        else:
-            is_nested_tail = is_nested_model(fitted_null['models'][null_tail + ' tail'],fitted_alt['models'][alt_tail + ' tail'])
-
-        if is_nested_head and is_nested_tail:
-            if 'PSR' in null_model:
-                is_nested_psr = True if 'PSR' in alt_model else False
-                if not is_nested_psr: continue
-            wilk_sig, delta_dof = get_nested_model_wilk_significance(fitted_null['fit_result'], fitted_alt['fit_result'])
-            dfmodels_wilk_dof.loc[null_model,  ("wilk", alt_model)] = wilk_sig
-            dfmodels_wilk_dof.loc[null_model,  ("delta_dof", alt_model)] = delta_dof
-    return dfmodels_wilk_dof
-
-def plot_dfmodels_wilk(dfmodels_wilk:pd.DataFrame, fontsize=15, rotation=45, figsize = (20,20), fig_ax=(None,None), shrink=0.7, labels=["","",""], annot=True, square=False):
-    title, xlabel, ylabel = labels
-    if fig_ax == (None,None): fig,ax = plt.subplots(figsize=figsize)
-    else: fig, ax = fig_ax
-    dfplot = dfmodels_wilk.where(dfmodels_wilk >= 0, np.nan).copy()
-    c = ["darkred","red","lightcoral", "gold", "yellow", "palegreen", "lightgreen","green","darkgreen"]
-    vmax=dfplot.max().max()
-    v3sig = 3./vmax
-    v5sig = 5./vmax
-    v = [0, v3sig-0.5*v3sig, v3sig-0.001*v3sig, v3sig, v3sig+0.999*(v5sig-v3sig), v5sig, v5sig+0.33*(1-v5sig), v5sig+0.66*(1-v5sig),1.]
-    l = list(zip(v,c))
-    cmap=LinearSegmentedColormap.from_list('rg',l, N=256*2)
-    sns.heatmap(dfplot.T.astype(float), annot=annot,annot_kws={'fontweight':'bold','fontsize':fontsize-2}, cbar=True, vmin=0, vmax=vmax,cmap=cmap, square=square, mask=dfplot.T.isna(),cbar_kws={"shrink": shrink, 'label': "significance [$\sigma$]"},ax=ax)
-
-    ax.invert_yaxis()
-    ax.set_xlabel(f"Null model" if xlabel == "" else xlabel, fontsize=fontsize)
-    ax.set_ylabel(f"Alternative model" if ylabel == "" else ylabel, fontsize=fontsize)
-    xticks = ax.get_xticklabels()
-    yticks = ax.get_yticklabels()
-    ax.set_xticklabels(xticks, rotation=rotation, fontsize=fontsize-3, ha='right')
-    ax.set_yticklabels(yticks, rotation=0, fontsize=fontsize-3, ha='right')
-    ax.grid(True, alpha=0.1)
-    ax.set_title(label="Wilk significance matrix\n" if title == "" else title, fontsize=fontsize+2)
-    plt.tight_layout()
-    plt.show()
-
-def get_dfbest_models(dfmodels_wilk:pd.DataFrame, results:dict, bkg_method='ring', fit_method='stacked', rel_L_tsh=1, sig_method='wilk'):
-    models_list = list(results[bkg_method]['results'].keys())
-    dfmodels = pd.DataFrame(index=pd.Index(models_list,name='model'))
-    models_to_remove = []
-    for tested_model in models_list:
-        fitted_model = results[bkg_method]['results'][tested_model][fit_method]
-        if (("fit_success" in fitted_model.keys()) and not fitted_model["fit_success"]):
-            dfmodels.loc[tested_model, "AIC"] = 1e3
-            dfmodels.loc[tested_model, "AIC"] = 1e3
-            models_to_remove.append(tested_model)
-            continue
-        fitted_model_res = fitted_model['fit_result']
-        dfmodels.loc[tested_model, "AIC"] = 2*len(fitted_model_res.parameters.free_parameters) + fitted_model_res.total_stat
-        # dfmodels['rel_L'] = np.exp((dfmodels.AIC.min() - dfmodels.AIC) * 0.5)
-        dfmodels.loc[tested_model, 'wilk'] = dfmodels_wilk.loc['No source - No source', tested_model]
-
-    if sig_method == 'wilk': best_models = dfmodels[~dfmodels.index.isin(models_to_remove)].index.to_list()
-    else:
-        best_models = dfmodels[~dfmodels.index.isin(models_to_remove) & (dfmodels.rel_L > np.exp(-rel_L_tsh))].sort_values(by="AIC",ascending=True).index.to_list()
-    
-    models_to_keep = []
-
-    for ibest in range(len(best_models)):
-        tested_model = best_models[ibest]
-        print(f"Tested model: {tested_model}")
-        
-        tested_model_wilk_as_null = dfmodels_wilk.loc[tested_model].copy()
-        tested_model_wilk_as_alt = dfmodels_wilk[tested_model].copy()
-
-        
-        better_alt_models = tested_model_wilk_as_null.loc[(tested_model_wilk_as_null > 3) & (tested_model_wilk_as_null != np.nan)]
-        better_null_models = tested_model_wilk_as_alt.loc[(tested_model_wilk_as_alt < 3) & (tested_model_wilk_as_alt >= 0) & (tested_model_wilk_as_alt != np.nan)]
-
-        worse_alt_models = tested_model_wilk_as_null.loc[(tested_model_wilk_as_null <= 3) & (tested_model_wilk_as_null >= 0) & (tested_model_wilk_as_null != np.nan)]
-        worse_null_models = tested_model_wilk_as_alt.loc[(tested_model_wilk_as_alt >= 3) & (tested_model_wilk_as_alt != np.nan)]
-        
-        if len(better_alt_models) > 0: better_alt_str = f"{len(better_alt_models)} more significant nested models"
-        else: better_alt_str = "No nested model is more significant"
-        if len(better_null_models) > 0: better_null_str = f"Model not more significant than {len(better_null_models)} nesting models"
-        else: better_null_str = "More significant than all nesting models"
-
-        if (len(better_alt_models) > 0) or (len(better_null_models) > 0):
-            models_to_remove.append(tested_model)
-            print(f"{better_null_str}\n{better_alt_str}\nModel removed\n")
-        else:
-            models_to_keep.append(tested_model)
-            print(f"{better_null_str}\n{better_alt_str}\nModel kept\n")
-
-    dfbest_models = dfmodels.reset_index()
-    dfbest_models = dfbest_models[dfbest_models.model.isin(models_to_keep)]
-    dfbest_models = dfbest_models[~dfbest_models.model.isin(models_to_remove)][["model", "wilk", "AIC"]]
-    dfbest_models['relative_L'] = np.exp((dfbest_models.AIC.min() - dfbest_models.AIC) * 0.5)
-    
-    return dfmodels, dfbest_models.sort_values(by="AIC")
-
-def get_plot_kwargs_from_models_dict(models_dict):    
-    plot_kwargs = models_dict["plot_kwargs"].copy()
-    plot_kwargs["energy_bounds"] = plot_kwargs["energy_bounds"] * u.Unit(plot_kwargs["energy_bounds_unit"])
-    plot_kwargs.pop("energy_bounds_unit", None)
-    plot_kwargs["yunits"] = u.Unit(plot_kwargs["yunits"])
-    return plot_kwargs
-
-def plot_ref(ax, ref_models, ref_source_name, ref_model_name, plot_type = "spectral"):
-    ref_source_dict = ref_models[ref_source_name]["published"][ref_model_name]
-
-    ref_source_model_dict=ref_source_dict["models"].copy()
-    ref_source_model_dict["name"] = ref_model_name
-    ref_source_model = SkyModel.from_dict(ref_source_model_dict)
-    plot_kwargs = get_plot_kwargs_from_models_dict(ref_source_dict)
-
-    if plot_type == "spectral":
-        plot_kwargs.pop("color_sigma", None)
-        plot_kwargs.pop("ls_sigma", None)
-        ref_source_model.spectral_model.plot(ax=ax, **plot_kwargs)
-        plot_kwargs.pop("label", None)
-        edgecolor = plot_kwargs["color"]
-        plot_kwargs.pop("color", None)
-        ref_source_model.spectral_model.plot_error(ax=ax, alpha=0.1, linewidth=1, edgecolor=edgecolor, facecolor="none", hatch='/', **plot_kwargs)
-    elif plot_type=='spatial':
-        center = SkyCoord(ra=ref_source_model.spatial_model.lon_0.value * u.deg,dec=ref_source_model.spatial_model.lat_0.value * u.deg, frame="icrs")
-        sigma = ref_source_model.spatial_model.sigma.value
-        r = SphericalCircle(center, sigma * u.deg,
-                                edgecolor=plot_kwargs["color_sigma"], facecolor='none',
-                                lw = 2,
-                                ls = plot_kwargs["ls_sigma"],
-                                transform=ax.get_transform('icrs'), label=plot_kwargs["label"])
-        ax.add_patch(r)
-
-def plot_spectra_from_models_dict(ax, results, ref_models, ref_source_name, ref_models_to_plot, results_to_plot=['all'], bkg_methods_to_plot=['all'], fit_methods_to_plot=['all'], colors = ['blue', 'darkorange', 'purple', 'green'], plot_flux_points=True):
-
-    for ref_model_name in ref_models_to_plot:
-        plot_ref(ax, ref_models, ref_source_name, ref_model_name, plot_type = "spectral")
-    
-    bkg_methods = ['ring', 'FoV'] if bkg_methods_to_plot == ['all'] else bkg_methods_to_plot
-    fit_methods = ['stacked', 'joint'] if fit_methods_to_plot == ['all'] else fit_methods_to_plot
-    tested_models = list(results[bkg_methods[0]]['results'].keys()) if results_to_plot == ['all'] else results_to_plot
-    i=0
-    for bkg_method in bkg_methods:
-        for tested_model in tested_models:
-            for fit_method in fit_methods:
-                if (len(results[bkg_method]['results'][tested_model][fit_method]) == 0): continue
-                results_model = results[bkg_method]['results'][tested_model][fit_method]['models'].copy()
-                for model in results_model[:-1]:
-                    model_name = model.name
-                    # print(model_name)
-                    flux_points = results[bkg_method]['results'][tested_model][fit_method][model_name]["flux_points"]
-                    i_color = 0 if 'tail' in model_name else 1
-                    plot_kwargs = {
-                        "energy_bounds": [flux_points.energy_min[flux_points.success.data.flatten()][0],flux_points.energy_max[flux_points.success.data.flatten()][-1]] * u.TeV,
-                        "sed_type": "e2dnde",
-                        "ls" : "-",
-                        "color": colors[i_color],
-                        "yunits": u.Unit("TeV cm-2 s-1"),
-                    }
-                    label = f"{model_name} ({bkg_method}, {fit_method})"
-                    if plot_flux_points:
-                        model.spectral_model.plot(ax=ax,**plot_kwargs.copy())
-                        model.spectral_model.plot_error(ax=ax, alpha=0.1, facecolor=colors[i_color], **plot_kwargs.copy())
-                        flux_points.plot(ax=ax, sed_type="e2dnde", label=label, color=colors[i_color], marker='o' if 'tail' in model_name else "x", markersize=5 if 'tail' in model_name else 7)
-                    else:
-                        model.spectral_model.plot(ax=ax,**plot_kwargs.copy(), label=label)
-                        model.spectral_model.plot_error(ax=ax, alpha=0.1, facecolor=colors[i_color], **plot_kwargs.copy())
-                i+=1
-
-def plot_spatial_model_from_dict(bkg_method, key, results, ref_models, ref_source_name, ref_models_to_plot, results_to_plot=['all'], bkg_methods_to_plot=['all'], fit_methods_to_plot=['all'], crop_width=0 * u.deg, estimator='excess', ring_bkg_param=None, figsize=(5,5),bbox_to_anchor=(1,1),fontsize=15, colors = ['blue', 'darkorange', 'purple', 'green']):
-    skymaps_args = {
-        'counts': {
-            'cbar_label': 'events',
-            'title': 'Counts map'
-        },
-        'background': {
-            'cbar_label': 'events',
-            'title': 'Background map'
-        },
-        'significance_all': {
-            'cbar_label': 'significance [$\sigma$]',
-            'title': 'Significance map'
-        },
-        'significance_off': {
-            'cbar_label': 'significance [$\sigma$]',
-            'title': 'Off significance map'
-        },
-        'excess': {
-            'cbar_label': 'events',
-            'title': 'Excess map'
-        },
-        'ts': {
-            'cbar_label': 'TS',
-            'title': 'TS map'
-        },
-        'flux': {
-            'cbar_label': 'flux [$s^{-1}cm^{-2}$]',
-            'title': f'Flux map ({bkg_method}, {estimator})\nwith 3$\sigma$ (white) and 5$\sigma$ (black) contour'
-        }
-    }
-
-    skymaps_dict = results[bkg_method][f'skymaps_{estimator}']
-    skymap = skymaps_dict[key]
-    skymap_sig = skymaps_dict["significance_all"]
-    if crop_width != 0 * u.deg:
-        width = 0.5 * skymap.geom.width[0][0]
-        binsize = width / (0.5 * skymap.data.shape[-1])
-        n_crop_px = int(((width - crop_width)/binsize).value)
-        skymap = skymap.crop(n_crop_px)
-        skymap_sig = skymap_sig.crop(n_crop_px)
-    
-    cbar_label, title = (skymaps_args[key]["cbar_label"], skymaps_args[key]["title"])
-
-    fig,ax=plt.subplots(figsize=figsize,subplot_kw={"projection": skymap.geom.wcs})
-    if key in ['counts', 'background']: skymap.smooth(0.01 * u.deg).plot(ax=ax, add_cbar=True, stretch="linear",kwargs_colorbar={'label': cbar_label, 'shrink':0.75})
-    elif key in ['excess', 'ts', 'flux']:
-        skymap.smooth(0.01 * u.deg).plot(ax=ax, add_cbar=True, stretch="linear", cmap='Greys_r')
-        im = ax.images        
-        cb = im[-1].colorbar
-        cb.set_label(cbar_label)
-    elif 'significance' in key: 
-        skymap.smooth(0.01 * u.deg).plot(ax=ax, add_cbar=True, stretch="linear",norm=CenteredNorm(), cmap='magma',kwargs_colorbar={'label': cbar_label, 'shrink':0.75})
-        maxsig = np.nanmax(skymap.data)
-        minsig = np.nanmin(skymap.data)
-        im = ax.images        
-        cb = im[-1].colorbar 
-        cb.ax.axhline(maxsig, c='g')
-        cb.ax.text(1.1,maxsig - 0.07,' max', color = 'g')
-        cb.ax.axhline(minsig, c='g')
-        cb.ax.text(1.1,minsig - 0.07,' min', color = 'g')
-    
-    ax.contour(skymap_sig.data[0], levels=[3,5], colors=['white', 'black'], alpha=0.5)
-
-    for ref_model_name in ref_models_to_plot:
-        plot_ref(ax, ref_models, ref_source_name, ref_model_name, plot_type = "spatial")
-    
-    both_bkg_methods = bkg_methods_to_plot == ['all']
-    both_fit_methods = fit_methods_to_plot == ['all']
-
-    bkg_methods = ['ring', 'FoV'] if both_bkg_methods else bkg_methods_to_plot
-    fit_methods = ['stacked', 'joint'] if fit_methods_to_plot == ['all'] else fit_methods_to_plot
-    tested_models = list(results[bkg_methods[0]]['results'].keys()) if results_to_plot == ['all'] else results_to_plot
-
-    i=0
-
-    for bkg_method in bkg_methods:
-        for tested_model in tested_models:
-            for fit_method in fit_methods:
-                fitted_null_model = results[bkg_method]['results']['No source - No source'][fit_method]["fit_result"]
-                label_methods = " ("* (both_bkg_methods or both_fit_methods) + bkg_method * both_bkg_methods +","*(both_bkg_methods and both_fit_methods)+ fit_method * both_fit_methods +")"* (both_bkg_methods or both_fit_methods)
-
-                if (len(results[bkg_method]['results'][tested_model][fit_method]) == 0): continue
-                results_model = results[bkg_method]['results'][tested_model][fit_method]['models'].copy()
-                j=0
-                for model in results_model[:-1]:
-                    model_name = model.name
-                    center = SkyCoord(ra=model.spatial_model.lon_0.value * u.deg,dec=model.spatial_model.lat_0.value * u.deg, frame="icrs")
-                    label=f"{model_name}{label_methods}"
-                    i_color = 0 if 'tail' in model_name else 1
-                    if j==0:
-                        fitted_alternative_model = results[bkg_method]['results'][tested_model][fit_method]['fit_result']
-                        wilk_sig = get_nested_model_wilk_significance(fitted_null_model, fitted_alternative_model, False)
-                        label_wilk= ", $\sqrt{TS}$" + f"={wilk_sig:.2f}"
-                    
-                    if "Point" in model_name:
-                        r = SphericalCircle(center, 0.04 * u.deg,
-                                            edgecolor='black', facecolor=colors[i_color],
-                                            ls = "-",
-                                            lw = 1,
-                                            transform=ax.get_transform('icrs'), label=label + label_wilk*(j==0))
-                        ax.add_patch(r)
-                    elif "Gauss" in model_name:
-                        sigma = model.spatial_model.sigma.value
-                        if "1D" in model_name:
-                            label += f": $\sigma$={sigma:.2f}°"
-                        
-                            r = SphericalCircle(center, sigma * u.deg,
-                                                edgecolor=colors[i_color], facecolor='none',
-                                                ls = "-",
-                                                lw = 3,
-                                                transform=ax.get_transform('icrs'), label=label + label_wilk*(j==0))
-                            ax.add_patch(r)
-                        else:
-                            sky_region = model.spatial_model.to_region(x_sigma=1.)
-                            pixel_region = sky_region.to_pixel(skymap.geom.wcs)
-                            label += ": $\sigma_{eff}$"+f"={sigma:.2f}°"
-                            pixel_region.plot(ax=ax,
-                                            color = colors[i_color],
-                                            lw=3,
-                                            ls = "-",
-                                            label=label + label_wilk*(j==0))
-                    elif ("Disk" in model_name) or ("Ellipse" in model_name):
-                        sky_region = model.spatial_model.to_region()
-                        pixel_region = sky_region.to_pixel(skymap.geom.wcs)
-                        if "Disk" in model_name:
-                            r_0 = model.spatial_model.r_0.value
-                            label += f": $r_0$={r_0:.2f}°"
-                        else:
-                            width_ellipse = sky_region.width.value
-                            height_ellipse = sky_region.height.value
-                            label += f": width,heigth={width_ellipse:.2f}°,{height_ellipse:.2f}°"
-
-                        pixel_region.plot(ax=ax,
-                                        color = colors[i_color],
-                                        lw=3,
-                                        ls = "-",
-                                        label=label + label_wilk*(j==0))
-                    j+=1
-                i+=1
-    pulsar_pos = SkyCoord.from_name('PSR J2229+6114')
-    if ref_source_name == "boomerang":
-        ax.errorbar(pulsar_pos.ra.value, pulsar_pos.dec.value, fmt='o', ms=5, color='lightgreen', label = 'PSR J2229+6114',
-            transform=ax.get_transform('icrs'))
-    ax.set_title(label=title,fontsize=fontsize)
-    ax.legend(fontsize=fontsize)
-    plt.tight_layout()
-    plt.show()
-
-def get_on_region_geom(results:dict, tested_model_name:str, bkg_method='ring', fit_method='stacked', i_component=0, plot=False):
-    skymap = results[bkg_method]['skymaps_excess']['flux']
-    energy_axis = skymap.geom.axes['energy']
-    tested_model = results[bkg_method]['results'][tested_model_name][fit_method]['models'][i_component].copy()
-    model_name = tested_model_name.split(' - ')[i_component]
-    label = model_name
-    if plot:
-        fig,ax=plt.subplots(figsize=(7,5),subplot_kw={"projection": skymap.geom.wcs})
-        colors = ["red"]
-        skymap.smooth(0.01 * u.deg).plot(ax=ax, add_cbar=True, stretch="linear", cmap='Greys_r')
-        i_color=0
-
-    if "Gauss" in model_name:
-        sigma = tested_model.spatial_model.sigma.value
-        sky_region = tested_model.spatial_model.to_region(x_sigma=1.)
-        on_geom = RegionGeom(sky_region, axes=[energy_axis])
-        pixel_region = sky_region.to_pixel(results['ring']['skymaps_excess']['ts'].geom.wcs)
-
-        if "1D" in model_name: label += f": $\sigma$={sigma:.2f}°"
-        else: label += ": $\sigma_{eff}$"+f"={sigma:.2f}°"
-    
-    elif ("Disk" in model_name) or ("Ellipse" in model_name):
-        sky_region = tested_model.spatial_model.to_region()
-        on_geom = RegionGeom(sky_region, axes=[energy_axis])
-        pixel_region = sky_region.to_pixel(results['ring']['skymaps_excess']['ts'].geom.wcs)
-        
-        if "Disk" in model_name:
-            r_0 = tested_model.spatial_model.r_0.value
-            label += f": $r_0$={r_0:.2f}°"
-        else:
-            width_ellipse = sky_region.width.value
-            height_ellipse = sky_region.height.value
-            label += f": width,heigth={width_ellipse:.2f}°,{height_ellipse:.2f}°"
-
-    if plot:
-        pixel_region.plot(ax=ax,
-                    color = colors[i_color],
-                    lw=1,
-                    ls = "-",
-                    label=label)
-        ax.set(title=f"Flux map")
-        plt.legend(loc='upper left', title = 'on region')
-        plt.tight_layout()
-        plt.show()
-    return on_geom
-
-def get_map_residuals_spatial(
-    stacked_dataset,
-    ax=None,
-    method="diff",
-    smooth_kernel="gauss",
-    smooth_radius="0.1 deg",
-    **kwargs,
-):
-    """Plot spatial residuals.
-
-    The normalization used for the residuals computation can be controlled
-    using the method parameter.
-
-    Parameters
-    ----------
-    ax : `~astropy.visualization.wcsaxes.WCSAxes`
-        Axes to plot on.
-    method : {"diff", "diff/model", "diff/sqrt(model)"}
-        Normalization used to compute the residuals, see `MapDataset.residuals`.
-    smooth_kernel : {"gauss", "box"}
-        Kernel shape.
-    smooth_radius: `~astropy.units.Quantity`, str or float
-        Smoothing width given as quantity or float. If a float is given, it
-        is interpreted as smoothing width in pixels.
-    **kwargs : dict
-        Keyword arguments passed to `~matplotlib.axes.Axes.imshow`.
-
-    Returns
-    -------
-    ax : `~astropy.visualization.wcsaxes.WCSAxes`
-        WCSAxes object.
-
-    Examples
-    --------
-    >>> from gammapy.datasets import MapDataset
-    >>> dataset = MapDataset.read("$GAMMAPY_DATA/cta-1dc-gc/cta-1dc-gc.fits.gz")
-    >>> kwargs = {"cmap": "RdBu_r", "vmin":-5, "vmax":5, "add_cbar": True}
-    >>> dataset.plot_residuals_spatial(method="diff/sqrt(model)", **kwargs) # doctest: +SKIP
-    """
-    counts, npred = stacked_dataset.counts.copy(), stacked_dataset.npred()
-
-    if counts.geom.is_region:
-        raise ValueError("Cannot plot spatial residuals for RegionNDMap")
-
-    if stacked_dataset.mask is not None:
-        counts *= stacked_dataset.mask
-        npred *= stacked_dataset.mask
-
-    counts_spatial = counts.sum_over_axes().smooth(
-        width=smooth_radius, kernel=smooth_kernel
-    )
-    npred_spatial = npred.sum_over_axes().smooth(
-        width=smooth_radius, kernel=smooth_kernel
-    )
-    residuals = stacked_dataset._compute_residuals(counts_spatial, npred_spatial, method)
-
-    if stacked_dataset.mask_safe is not None:
-        mask = stacked_dataset.mask_safe.reduce_over_axes(func=np.logical_or, keepdims=True)
-        residuals.data[~mask.data] = np.nan
-    return residuals
 
 #-------------------------------------------------------------------------------------
 # Misc
