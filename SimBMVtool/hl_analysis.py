@@ -102,14 +102,14 @@ def add_model_to_models_dict(models_seeds:list, models_dict={}, model_name="Poin
                     model.parameters['phi'].max = 360
 
                 model.parameters['sigma'].min = 0.05
-                model.parameters['sigma'].max = 0.7
+                model.parameters['sigma'].max = 0.4
             
             elif model_spatial in ["Disk", "Ellipse"]:
                 if not is_same_spatial_type:
                     model.spatial_model = DiskSpatialModel(lon_0=ref_source_model.spatial_model.lon_0, lat_0=ref_source_model.spatial_model.lat_0, r_0=0.2*u.deg, e=0, phi=0*u.deg, edge_width=0.01, frame="icrs")
                 
                 model.parameters['r_0'].min = 0.01
-                model.parameters['r_0'].max = 1.5
+                model.parameters['r_0'].max = 1.
                 
                 model.spatial_model.e.frozen = True
                 model.spatial_model.phi.frozen = True
@@ -124,7 +124,7 @@ def add_model_to_models_dict(models_seeds:list, models_dict={}, model_name="Poin
                     model.parameters['phi'].min = 0.
                     model.parameters['phi'].max = 360
 
-            index =  model.parameters['index'] if ref_source_model_dict['spectral']['type'] in ['PowerLawSpectralModel', 'ExpCutoffPowerLawSpectralModel'] else 2.*u.deg
+            index =  model.parameters['index'] if ref_source_model_dict['spectral']['type'] in ['PowerLawSpectralModel', 'ExpCutoffPowerLawSpectralModel'] else 2.
             lambda_ =  model.parameters['lambda_'] if ref_source_model_dict['spectral']['type'] == 'ExpCutoffPowerLawSpectralModel' else 1e-2/u.TeV
             alpha =  model.parameters['alpha'] if ref_source_model_dict['spectral']['type'] in ['ExpCutoffPowerLawSpectralModel','LogParabolaSpectralModel'] else (1. if model_spectral=='ECPL' else 2.)
             beta =  model.parameters['beta'] if ref_source_model_dict['spectral']['type'] == 'LogParabolaSpectralModel' else 1.
@@ -151,11 +151,11 @@ def add_model_to_models_dict(models_seeds:list, models_dict={}, model_name="Poin
                 model.parameters['beta'].min = 0.
                 model.parameters['beta'].max = 2.
 
-            model.parameters['lon_0'].min = model.spatial_model.lon_0.value - 0.8
-            model.parameters['lon_0'].max = model.spatial_model.lon_0.value + 0.8
+            model.parameters['lon_0'].min = model.spatial_model.lon_0.value - 0.4
+            model.parameters['lon_0'].max = model.spatial_model.lon_0.value + 0.4
 
-            model.parameters['lat_0'].min = model.spatial_model.lat_0.value - 0.8
-            model.parameters['lat_0'].max = model.spatial_model.lat_0.value + 0.8
+            model.parameters['lat_0'].min = model.spatial_model.lat_0.value - 0.4
+            model.parameters['lat_0'].max = model.spatial_model.lat_0.value + 0.4
 
             model.parameters['amplitude'].min = model.parameters['amplitude'].value / 1e2
             model.parameters['amplitude'].max = model.parameters['amplitude'].value * 1e2
@@ -395,7 +395,7 @@ def plot_ref(ax, ref_models, ref_source_name, ref_model_name, plot_type = "spect
                 color=plot_kwargs["color_sigma"],
                 edgecolor="white",
                 marker="o",
-                s=60,
+                s=120,
                 lw=1.5,
                 label = plot_kwargs["label"]
             )
@@ -411,7 +411,7 @@ def plot_ref(ax, ref_models, ref_source_name, ref_model_name, plot_type = "spect
             ax.add_patch(r)
         
 
-def plot_spatial_model_from_dict(bkg_method, key, results, ref_models, ref_source_name, ref_models_to_plot, results_to_plot=['all'], bkg_methods_to_plot=['all'], fit_methods_to_plot=['all'], width=2 * u.deg, crop_width=0 * u.deg, estimator='excess', ring_bkg_param=None, figsize=(5,5),bbox_to_anchor=(1,1),fontsize=15, colors = ['blue', 'darkorange', 'purple', 'green'], smooth = 0.02, vmin_vmax=(-4.5,8.65),peak_dist_min=0.2):
+def plot_spatial_model_from_dict(bkg_method, key, results, ref_models, ref_source_name, ref_models_to_plot, results_to_plot=['all'], bkg_methods_to_plot=['all'], fit_methods_to_plot=['all'], width=2 * u.deg, estimator='excess', figsize=(5,5),bbox_to_anchor=(1,1),fontsize=15, colors = ['blue', 'darkorange', 'purple', 'green'], smooth = 0.02, vmin_vmax=(-4.5,8.65),peak_dist_min=0.2):
     skymaps_args = {
         'counts': {
             'cbar_label': 'events',
@@ -447,17 +447,10 @@ def plot_spatial_model_from_dict(bkg_method, key, results, ref_models, ref_sourc
     facecolor_legend = "indigo"
     alpha_legend = 0.5
 
-    color_ref = "lime"
-    lw_sigma = 1.5
-    alpha_sigma = 1
-
     colors_contours = ["w", "crimson"]
     alpha_contours = 1
     lw_contours = [1, 1.5]
     
-    pulsar_pos = SkyCoord.from_name('PSR J2229+6114')
-    # vmin, vmax = vmin_vmax
-
     skymaps_dict = results[bkg_method][f'skymaps_{estimator}']
     skymap = skymaps_dict[key].cutout(position=skymaps_dict[key]._geom.center_skydir, width=width)
     skymap_sig = skymaps_dict["significance_all"].cutout(position=skymaps_dict["significance_all"]._geom.center_skydir, width=width)
@@ -473,10 +466,6 @@ def plot_spatial_model_from_dict(bkg_method, key, results, ref_models, ref_sourc
     ax.clabel(CS, [3,5,], inline=3, fontsize=12, colors=colors_contours)
     im = ax.images[-1]
     plt.colorbar(im,ax=ax, shrink=1, label=cbar_label)
-    
-    # cb = im.colorbar
-    # cb.ax.axhline(vmax, c='crimson')
-    # cb.ax.text(1.1,vmax - 0.07,' peak', color = 'crimson')
     
     for ref_model_name in ref_models_to_plot:
         plot_ref(ax, ref_models, ref_source_name, ref_model_name, plot_type = "spatial")
@@ -498,7 +487,7 @@ def plot_spatial_model_from_dict(bkg_method, key, results, ref_models, ref_sourc
             tested_model_str = ""
             for fit_method in fit_methods:
                 fitted_null_model = results[bkg_method][res_key][no_source_in_fov_model][fit_method]["fit_result"]
-                label_methods = " ("* (both_bkg_methods or both_fit_methods) + bkg_method * (both_bkg_methods or at_least_two_bkg_methods) +","*(both_bkg_methods and both_fit_methods)+ fit_method * both_fit_methods +")"* (both_bkg_methods or both_fit_methods or at_least_two_bkg_methods)
+                label_methods = " ("* (both_bkg_methods or both_fit_methods or at_least_two_bkg_methods) + bkg_method * (both_bkg_methods or at_least_two_bkg_methods) +","*(both_bkg_methods and both_fit_methods)+ fit_method * both_fit_methods +")"* (both_bkg_methods or both_fit_methods or at_least_two_bkg_methods)
 
                 if (len(results[bkg_method][res_key][tested_model][fit_method]) == 0): continue
                 results_model = results[bkg_method][res_key][tested_model][fit_method]['models'].copy()
@@ -598,7 +587,7 @@ def plot_spectra_from_models_dict(ax, results, ref_models, ref_source_name, ref_
                             "yunits": u.Unit("TeV cm-2 s-1"),
                         }
                         
-                        model_name_label = model_name[:-2] if len(results_model[:-n_bkg])==1 else model_name
+                        model_name_label = model_name[:-2]
                         label = f"{model_name_label} ({bkg_method}, {fit_method})"
                         model.spectral_model.plot(ax=ax, label=label,**plot_kwargs.copy())
                         model.spectral_model.plot_error(ax=ax, alpha=0.1, facecolor=colors[i_color], **plot_kwargs.copy())
@@ -624,8 +613,6 @@ def plot_spectra_from_models_dict(ax, results, ref_models, ref_source_name, ref_
                         flux_points = results[bkg_method][res_key][tested_model][fit_method][model_name]["flux_points"]
                         flux_points.plot(ax=ax, sed_type="e2dnde", color=colors[i_color], marker='o' if 'tail' in model_name else "x", markersize=5 if 'tail' in model_name else 7)
                 i+=1
-
-
 
 def get_on_region_geom(results:dict, tested_model_name:str, bkg_method='ring', fit_method='stacked', i_component=0, plot=False):
     skymap = results[bkg_method]['skymaps_excess']['flux']

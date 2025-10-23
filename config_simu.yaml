@@ -31,13 +31,14 @@ simulation:
   t_ref: '2024-10-05 23:00:00'                # The first run starting time. The altaz pointing will depend on this date
   delay: 600                                  # [s]
   time_oversampling: 300                      # [s] time step between subdatasets, i.e. maximum time step for background IRF evaluation
+  linear_grad_evolution: True                 # If lon_grad_variation or lat_grad_variation is True, increment gradient from 0 to gradient value with a step of 1/n_run
 source:
   catalog_name: Crab nebula                   # Catalog name. If not found, will use coordinates given in config
   coordinates:
     ra: 83.63308
     dec: 22.0145
   flux_to_0: True                             # Set to True for background only simulated data. If False, the source needs to be in Gammacat or declared in custom_source
-  is_custom: False
+  is_custom: False                            # Set to True to simulate with custom_source model. If False, use catalog.
   custom_source:
     name: crab disk
     spectral:
@@ -58,6 +59,7 @@ source:
                       {'name': 'frame', 'value': icrs}]
   exclusion_region:
     shape: noexclusion                          # n_shapes, noexclusion.
+    safe_radius_from_map_center: 1.5           # [deg]
     regions:
       circle_1:                              # Shapes can be circle, ellipse or ractangle, with SkyRegion parameters
         radius: 0.3
@@ -96,9 +98,13 @@ background:
       width: 0.3                # [deg]
     fov:
       method: scale # scale, fit
+      spectral_model: pl-norm # pl-norm, lp-norm
 acceptance:
   dimension: 3
   tool: baccmod
+  log_level:
+    output: "MOREINFO"
+    terminal: "WARNING"
   method: stack # stack,fit
   out_collection: True
   true_collection: False        # If False, the same background IRF is used as true irf for all observations

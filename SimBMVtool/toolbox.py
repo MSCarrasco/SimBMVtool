@@ -155,12 +155,13 @@ def get_obs_collection(dir_path,pattern,multiple_simulation_subdir=False,from_in
         for iobs, obs_id in enumerate(obs_ids):
             if (obs_collection[iobs].aeff is None) or (obs_collection[iobs].edisp is None) or (obs_collection[iobs].psf is None) or (obs_collection[iobs].bkg is None) or (obs_collection[iobs].gti is None):
                 try:
-                    irf_dict = load_irf_dict_from_file(dir_path+'/'+str(irf_files[iobs]))
-                    if (obs_collection[iobs].aeff is None) & ('aeff' in irf_dict): obs_collection[iobs].aeff = irf_dict['aeff']
-                    if (obs_collection[iobs].edisp is None) & ('edisp' in irf_dict): obs_collection[iobs].edisp = irf_dict['edisp']
-                    if (obs_collection[iobs].psf is None) & ('psf' in irf_dict): obs_collection[iobs].psf = irf_dict['psf']
-                    if (obs_collection[iobs].bkg is None) & ('bkg' in irf_dict): obs_collection[iobs].bkg = irf_dict['bkg']
-                    if (obs_collection[iobs].gti is None) & ('gti' in irf_dict): obs_collection[iobs].bkg = irf_dict['gti']
+                    irf_dict_path = str(irf_files[iobs]) if dir_path in str(irf_files[iobs]) else dir_path+'/'+ str(irf_files[iobs])
+                    irf_dict = load_irf_dict_from_file(irf_dict_path)
+                    if (obs_collection[iobs].aeff is None) & ('aeff' in irf_dict): obs_collection[iobs].aeff = deepcopy(irf_dict['aeff'])
+                    if (obs_collection[iobs].edisp is None) & ('edisp' in irf_dict): obs_collection[iobs].edisp = deepcopy(irf_dict['edisp'])
+                    if (obs_collection[iobs].psf is None) & ('psf' in irf_dict): obs_collection[iobs].psf = deepcopy(irf_dict['psf'])
+                    if (obs_collection[iobs].bkg is None) & ('bkg' in irf_dict): obs_collection[iobs].bkg = deepcopy(irf_dict['bkg'])
+                    if (obs_collection[iobs].gti is None) & ('gti' in irf_dict): obs_collection[iobs].bkg = deepcopy(irf_dict['gti'])
                 except:
                     logger.info('Error when loading irf dictionnary')
     else:

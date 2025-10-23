@@ -2065,26 +2065,77 @@ class BMVCreator(BaseSimBMVtoolCreator):
                                                         ) # Normalisation is done for each energy bin separately
                 model_bkg = FoVBackgroundModel(dataset_name=stacked_on_off.name, spectral_model=spectral_model_bkg.copy(name=f"Piecewise Norm Bkg"))
                 tested_model.append(model_bkg)
-            
+                for iEbin in range(len(energy_center)):
+                    tested_model.parameters[f'norm_{iEbin}'].min = 0.98
+                    tested_model.parameters[f'norm_{iEbin}'].max = 1.02
             if isinstance(stacked_on_off, MapDatasetOnOff): stacked_on_off = stacked_on_off.to_map_dataset(name=stacked_on_off.name)
             dataset.append(stacked_on_off.copy(name=stacked_on_off.name))
             
             dataset.models = tested_model
-            
+
+            # -------------------------------------------
+            # Optimization options
+            optimize_options = {
+                "print_level": 1,
+                "tol": 1e-3,
+                "maxcall": 6000,
+                "strategy": 2
+            }
+
+            # Maximum number of retries if MINUIT did not converge
+            n_attempts = self.cfg_hl_analysis["n_attempts_fit"] if "n_attempts_fit" in self.cfg_hl_analysis.keys() else 3
+
+            # -------------------------------------------
+            # Run fit with automatic retry if not converged
             try:
-                fit = Fit(optimize_opts={"print_level": 1})
+
+                # -------------------------------------------
+                # Run fit with automatic retry if not converged
+                fit = Fit(optimize_opts=optimize_options)
                 result = fit.run(datasets=dataset)
                 minuit = result.optimize_result.minuit
 
-                print(minuit)
-                # print(result)
+                attempt = 1
+                while not minuit.valid and attempt < n_attempts:
+                    print(f"*** Fit did NOT converge for model {model_name}, retry attempt {attempt}... ***")
 
-                display(tested_model.to_parameters_table())
-                results[model_name][fit_method]={
-                        "fit_success" : True,
-                        "fit_result" : result,
-                        "models" : tested_model.copy()
-                    }
+                    # Initialize new Fit with possibly increased maxcall
+                    fit_retry = Fit(optimize_opts={
+                        "print_level": 1,
+                        "tol": 1e-3,
+                        "maxcall": 10000,
+                        "strategy": 2
+                    })
+
+                    # Initialize parameters from previous result
+                    for param in dataset.models.parameters:
+                        if param.name in minuit.values:
+                            param.value = minuit.values[param.name]
+
+                    # Rerun the fit
+                    result_retry = fit_retry.run(datasets=dataset)
+                    minuit_retry = result_retry.optimize_result.minuit
+
+                    if minuit_retry.valid:
+                        print(f"*** Fit converged on retry attempt {attempt} ***")
+                        result = result_retry
+                        minuit = minuit_retry
+                        break
+
+                    attempt += 1
+
+                # -------------------------------------------
+                # Store results
+                results[model_name][fit_method] = {
+                    "fit_success": True,
+                    "fit_converged": minuit.valid,
+                    "minuit": minuit,
+                    "fit_result": result,
+                    "models": tested_model.copy()
+                }
+
+                if not minuit.valid:
+                    print(f"*** WARNING: Fit did not converge after {n_attempts} attempts for model {model_name} ***")
                 
                 # stacked_for_maps = deepcopy(self.stacked_dataset)
                 # stacked_for_maps.models = tested_model.copy()
@@ -2092,9 +2143,12 @@ class BMVCreator(BaseSimBMVtoolCreator):
                 for i, model in enumerate(tested_model[:-1]):
                     component_name = model.name
                     model_str += (("" if i == 0 else " - ") + component_name[:-2])
+                
+                if len(model_str) == 0: model_str = "Background only"
+
                 lima_maps = get_lima_maps(deepcopy(dataset[0]), self.correlation_radius, self.correlate_off, estimator='excess', model_source=None)
                 cutout_width = self.axis_info_dataset[-1][0] *u.deg
-                plot_significance_residuals(f"Significance residuals", deepcopy(lima_maps),title=f"{model_str} ({bkg_method})",figsize=(12,6), width_left=1.8,n_bins=29,n_sigma=1, cutout_width=cutout_width, return_minmax=False)
+                plot_significance_residuals(f"Significance residuals", deepcopy(lima_maps),title=f"{model_str} ({bkg_method})",figsize=(12,6), width_left=1.8,n_bins=30,n_sigma=1, cutout_width=cutout_width, return_minmax=False)
                 plt.show()
 
                 if analysis_dim==3:
@@ -2136,12 +2190,6 @@ class BMVCreator(BaseSimBMVtoolCreator):
                         "fit_success" : False
                     }
             self.results_analysis[bkg_method][f"results_{analysis_dim}d"][model_name] = deepcopy(results[model_name])
-            # if all_point_pl:
-                
-        # self.results_analysis[bkg_method] = {
-        #     "skymaps_excess": deepcopy(self.skymaps_dict),
-        #     f"results_{analysis_dim}d" : deepcopy(results),
-        # }
 
         if analysis_dim == 3: self.compute_dfmodels(bkg_method, fit_method)
         return self.results_analysis

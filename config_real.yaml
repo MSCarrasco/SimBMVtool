@@ -37,9 +37,13 @@ background:
       width: 0.35                # [deg]
     fov:
       method: fit # scale, fit
+      spectral_model: pl-norm # pl-norm, lp-norm
 acceptance:
   dimension: 3
   tool: baccmod
+  log_level:
+    output: "MOREINFO"
+    terminal: "WARNING"
   method: stack # stack,fit
   out_collection: True # False if same output IRF for all runs, like with pybkgmodel
   FoV_alignment: ALTAZ # ALTAZ, RADEC
