@@ -1,0 +1,91 @@
+---
+paths:
+  path_data: ./gammapy-extra/datasets/hess-dl3-dr1/data # Path to dl3 files containing the full-enclosure IRFs
+  gammapy_catalog: ./gammapy-extra/datasets/catalogs/gammacat/gammacat.fits.gz 
+  models: ./SimBMVtool/models.yaml
+  output_dir: ./outputs
+  subdir: msh1552_hess
+data:
+  run_list: [20282, 20283, 20301, 20302, 20303, 20322, 20323, 20324, 20325,
+       20343, 20344, 20345, 20346, 20365, 20366, 20367, 20368] #[]
+ # None, array of obs_ids
+  obs_pattern: hess_dl3_*
+  cos_zenith_bin_edges: [-0.0, 0.25, 0.5, 0.75, 1.0] 
+  cos_zenith_bin_centers:  [0.125, 0.375, 0.625, 0.875]
+source:
+  catalog_name: MSH 15-5-02 # Gammacat name. If not found, will use coordinates given in config
+  coordinates:
+    ra: 228.32080078
+    dec: -59.08169937
+  exclusion_region:
+    shape: n_shapes # n_shapes, noexclusion
+    safe_radius_from_map_center: 1.8           # [deg]
+    regions:
+      ellipse_1:
+          ra: 228.4
+          dec: -59.171
+          width: 0.8
+          height: 0.7
+          angle: 101
+          is_source: True
+background:
+  maker:
+    correlation_radius: 0.15    # [deg]
+    correlate_off: True
+    ring:
+      internal_ring_radius: 0.15 # [deg]
+      width: 0.25                # [deg]
+    fov:
+      method: scale # scale, fit
+      spectral_model: pl-norm # pl-norm, lp-norm
+acceptance:
+  dimension: 3
+  tool: baccmod
+  log_level:
+    output: "MOREINFO"
+    terminal: "WARNING"
+  method: fit # stack,fit
+  out_collection: True
+  FoV_alignment: ALTAZ # ALTAZ, RADEC
+  fov_rotation_error_limit: 1                 # [deg] maximum estimated FoV rotation error before re-evaluation of the background IRF evaluation by gammapy
+  energy:
+    e_min: 0.5
+    e_max: 10
+    unit: TeV
+    nbin: 7
+  offset:
+    offset_max: 3           # [deg]
+    nbin: 8
+  cos_zenith_binning:
+    zenith_binning: False
+    zenith_interpolation: False
+    zenith_binning_run_splitting: False
+    initial_cos_zenith_binning: 0.01
+    runwise_normalisation: False
+    cos_zenith_binning_method: min_livetime_per_wobble
+    cos_zenith_binning_parameter_value: 3600    # [s] if 'livetime' in method, n_obs if 'observation' in method
+  fit:
+    fnc: bilinear_gaussian2d
+    bounds:
+      x_cm: [-5,5]
+      y_cm: [-5,5]
+      # psi: [0,0]
+      #width: [0.3,0.33]
+      #length: [0.3,0.33]
+      #x_gradient: [-11,-9.99] 
+      #y_gradient: [0,0]
+hl_analysis:
+  do_baccmod: False
+  e_min: 0.5
+  e_max: 10
+  nbin_E_per_decade_fit: 4
+  nbin_E_per_decade_dataset: 4
+  offset_max: 2.5
+  width: 3
+  bkg_maker: ["ring", "FoV"]
+  hla_fit_method: stacked     # stacked, joint, both
+  spatial_models: ["Ellipse", "2D Gauss"] #["Point", "1D Gauss", "2D Gauss", "Disk", "Ellipse"]
+  spectral_models: ["PL"] # ["PL", "ECPL", "LP"]
+  models_list: [] # Empty if all models to try
+  save_file_suffix: tutorial
+  with_psr: False # To-do: make this parameter optional

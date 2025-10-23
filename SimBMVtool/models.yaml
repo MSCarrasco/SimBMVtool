@@ -104,6 +104,56 @@ crab:
                 sed_type: "e2dnde"
                 color: "black"
                 yunits: "TeV cm-2 s-1"
+MSH15-52:
+  published:
+    hess:
+        models:
+            name: hess
+            spectral:
+                type: PowerLawSpectralModel
+                parameters: [{'name': 'index',
+                                'value': 2.41,
+                                'error': 0.05},
+                            {'name': 'amplitude',
+                                'value': 2.91e-12,
+                                'unit': 'TeV-1 s-1 cm-2',
+                                'error': 0.14e-12},
+                            {'name': 'reference', 'value': 1.4, 'unit': 'TeV'}]
+            spatial:
+                type: DiskSpatialModel
+                parameters: [{'name': 'lon_0',
+                                    'value': 228.549,
+                                    'unit': 'deg',
+                                    'error': 0.011},
+                                {'name': 'lat_0',
+                                    'value':  -59.1715,
+                                    'unit': 'deg',
+                                    'error': 0.007},
+                                {'name': 'r_0',
+                                    'value': 0.196,
+                                    'unit': 'deg',
+                                    'error': 0.007},
+                                {'name': 'phi',
+                                    'value': 151,
+                                    'unit': 'deg',
+                                    'error': 6},
+                                {'name': 'edge_width',
+                                    'value': 0.01},
+                                {'name': 'e', 
+                                    'value': 0.801,
+                                    'error': 0.038},
+                                {'name': 'frame', 
+                                    'value': 'icrs'}]
+        plot_kwargs:
+            label: "M. et al. (2019)"
+            energy_bounds: [0.5,10]
+            energy_bounds_unit: "TeV"
+            sed_type: "e2dnde"
+            color: "green"
+            ls: "--"
+            yunits: "TeV cm-2 s-1"
+            color_sigma: "white"
+            ls_sigma: "-"
 background:
     custom:
         gauss-pl:
