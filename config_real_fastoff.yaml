@@ -1,7 +1,7 @@
 ---
 paths:
   path_data: <path_to_test_dl3_fastoff>
-  gammapy_catalog: ./gammapy-extra/datasets/catalogs/gammacat/gammacat.fits.gz 
+  gammapy_catalog: ./gammapy-datasets/2.0/catalogs/gammacat/gammacat.fits.gz 
   models: ./SimBMVtool/models.yaml
   output_dir: ./outputs
   subdir: fastoffline
