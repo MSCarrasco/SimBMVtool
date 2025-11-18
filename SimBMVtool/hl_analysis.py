@@ -56,7 +56,7 @@ def get_models_names_list(spatial_models=["Point"], spectral_models=["PL"], n_so
             models_names.append(" - ".join(comb[::-1]))
     return models_names
 
-def add_model_to_models_dict(models_seeds:list, models_dict={}, model_name="Point PL", same_seeds=True):
+def add_model_to_models_dict(models_seeds:list, models_dict={}, model_name="Point PL", same_seeds=True, frozen_spatial=False, frozen_spectral=False):
     spatial_types_dict = dict([("Point", "PointSpatialModel"), ("1D Gauss", "GaussianSpatialModel"), ("2D Gauss", "GaussianSpatialModel"),
                            ("Disk", "DiskSpatialModel"),("Ellipse", "DiskSpatialModel")])
     spectral_types_dict = dict([("PL", "PowerLawSpectralModel"), ("ECPL", "ExpCutoffPowerLawSpectralModel"), ("LP", "LogParabolaSpectralModel")])
@@ -77,7 +77,9 @@ def add_model_to_models_dict(models_seeds:list, models_dict={}, model_name="Poin
             is_same_spatial_type = (spatial_types_dict[model_spatial]==ref_spatial_type)
             is_same_spectral_type = (spectral_types_dict[model_spectral]==ref_spectral_type)
             
-            if (model_spatial != "Point") or is_same_spatial_type: model = ref_source_model.copy(name=model_name_component)
+            if (model_spatial != "Point") or is_same_spatial_type:
+                model = ref_source_model.copy(name=model_name_component)
+                if frozen_spatial: model.spatial_model.freeze()
             else:
                 model_new = PointSpatialModel(lon_0=ref_source_model.spatial_model.lon_0, lat_0=ref_source_model.spatial_model.lat_0, frame="icrs")
                 model = SkyModel(name=model_name_component, spatial_model=model_new.copy(), spectral_model=ref_source_model.spectral_model.copy())
@@ -88,6 +90,8 @@ def add_model_to_models_dict(models_seeds:list, models_dict={}, model_name="Poin
                     model.spatial_model = GaussianSpatialModel(lon_0=ref_source_model.spatial_model.lon_0, lat_0=ref_source_model.spatial_model.lat_0, sigma=0.15*u.deg, e=0, phi=0*u.deg, frame="icrs")
 
                 if model_dim == 1:
+                    model.parameters['e'].value = 0.
+                    model.parameters['phi'].value= 0.
                     model.spatial_model.e.frozen = True
                     model.spatial_model.phi.frozen = True
 
@@ -111,10 +115,12 @@ def add_model_to_models_dict(models_seeds:list, models_dict={}, model_name="Poin
                 model.parameters['r_0'].min = 0.01
                 model.parameters['r_0'].max = 1.
                 
-                model.spatial_model.e.frozen = True
-                model.spatial_model.phi.frozen = True
-
-                if model_spatial == "Ellipse":
+                if model_spatial == "Disk":
+                    model.parameters['e'].value = 0.
+                    model.parameters['phi'].value= 0.
+                    model.spatial_model.e.frozen = True
+                    model.spatial_model.phi.frozen = True
+                elif model_spatial == "Ellipse":
                     model.spatial_model.e.frozen = False
                     model.spatial_model.phi.frozen = False
 
@@ -129,7 +135,8 @@ def add_model_to_models_dict(models_seeds:list, models_dict={}, model_name="Poin
             alpha =  model.parameters['alpha'] if ref_source_model_dict['spectral']['type'] in ['ExpCutoffPowerLawSpectralModel','LogParabolaSpectralModel'] else (1. if model_spectral=='ECPL' else 2.)
             beta =  model.parameters['beta'] if ref_source_model_dict['spectral']['type'] == 'LogParabolaSpectralModel' else 1.
             
-            if model_spectral in ["PL", "ECPL"]:
+            if frozen_spectral: model.sectral_model.freeze()
+            elif model_spectral in ["PL", "ECPL"]:
                 if not is_same_spectral_type:
                     if model_spectral == "PL":
                         model.spectral_model = PowerLawSpectralModel(index=index, amplitude=model.parameters['amplitude'],reference=model.parameters['reference'])
@@ -141,7 +148,6 @@ def add_model_to_models_dict(models_seeds:list, models_dict={}, model_name="Poin
                 if model_spectral == "ECPL":
                     model.parameters['lambda_'].min = -0.1
                     model.parameters['lambda_'].max = 1
-            
             elif model_spectral == "LP":
                 if not is_same_spectral_type:
                     model.spectral_model = LogParabolaSpectralModel(alpha=alpha, beta=beta, amplitude=model.parameters['amplitude'],reference=model.parameters['reference'])
@@ -367,7 +373,7 @@ def get_plot_kwargs_from_models_dict(models_dict):
     plot_kwargs["yunits"] = u.Unit(plot_kwargs["yunits"])
     return plot_kwargs
 
-def plot_ref(ax, ref_models, ref_source_name, ref_model_name, plot_type = "spectral"):
+def plot_ref(ax, ref_models, ref_source_name, ref_model_name, plot_type = "spectral", skymap=None):
     ref_source_dict = ref_models[ref_source_name]["published"][ref_model_name]
 
     ref_source_model_dict=ref_source_dict["models"].copy()
@@ -400,15 +406,14 @@ def plot_ref(ax, ref_models, ref_source_name, ref_model_name, plot_type = "spect
                 label = plot_kwargs["label"]
             )
         else:
-            if "Gaussian" in ref_source_model_dict['spatial']['type']: extension = ref_source_model.spatial_model.sigma.value
-            elif "Disk" in ref_source_model_dict['spatial']['type']: extension = ref_source_model.spatial_model.r_0.value
-            r = SphericalCircle(center, extension * u.deg,
-                                    edgecolor=plot_kwargs["color_sigma"], facecolor='none',
-                                    lw = plot_kwargs["lw_sigma"],
-                                    ls = plot_kwargs["ls_sigma"],
-                                    alpha = plot_kwargs["alpha_sigma"],
-                                    transform=ax.get_transform('icrs'), label=plot_kwargs["label"])
-            ax.add_patch(r)
+            sky_region = ref_source_model.spatial_model.to_region()
+            on_geom = RegionGeom(sky_region, axes=[skymap._geom.axes['energy']])
+            pixel_region = sky_region.to_pixel(skymap.geom.wcs)
+            pixel_region.plot(ax=ax,
+                        color = plot_kwargs["color_sigma"],
+                        lw=1,
+                        ls = "-",
+                        label=plot_kwargs["label"])
         
 
 def plot_spatial_model_from_dict(bkg_method, key, results, ref_models, ref_source_name, ref_models_to_plot, results_to_plot=['all'], bkg_methods_to_plot=['all'], fit_methods_to_plot=['all'], width=2 * u.deg, estimator='excess', figsize=(5,5),bbox_to_anchor=(1,1),fontsize=15, colors = ['blue', 'darkorange', 'purple', 'green'], smooth = 0.02, vmin_vmax=(-4.5,8.65),peak_dist_min=0.2):
@@ -468,7 +473,7 @@ def plot_spatial_model_from_dict(bkg_method, key, results, ref_models, ref_sourc
     plt.colorbar(im,ax=ax, shrink=1, label=cbar_label)
     
     for ref_model_name in ref_models_to_plot:
-        plot_ref(ax, ref_models, ref_source_name, ref_model_name, plot_type = "spatial")
+        plot_ref(ax, ref_models, ref_source_name, ref_model_name, plot_type = "spatial",skymap=skymap)
 
     both_bkg_methods = bkg_methods_to_plot == ['all']
     both_fit_methods = fit_methods_to_plot == ['all']
@@ -476,11 +481,12 @@ def plot_spatial_model_from_dict(bkg_method, key, results, ref_models, ref_sourc
     at_least_two_bkg_methods = len(bkg_methods_to_plot) > 1
 
     bkg_methods = ['ring', 'FoV'] if both_bkg_methods else bkg_methods_to_plot
-    fit_methods = ['stacked', 'joint'] if fit_methods_to_plot == ['all'] else fit_methods_to_plot
+    fit_methods = ['stacked', 'joint'] if fit_methods_to_plot is ['all'] else fit_methods_to_plot
     res_key = 'results' if 'results' in results[bkg_methods[0]].keys() else f'results_3d'
-    tested_models = list(results[bkg_methods[0]][res_key].keys()) if results_to_plot == ['all'] else results_to_plot
+    tested_models = list(results[bkg_methods[0]][res_key].keys()) if results_to_plot is ['all'] else results_to_plot
     no_source_in_fov_model = list(results[bkg_methods[0]][res_key].keys())[0]
     i=0
+    i_color=0
     lw_result = 3
     for ibkg_method,bkg_method in enumerate(bkg_methods):
         for tested_model in tested_models:
@@ -498,7 +504,6 @@ def plot_spatial_model_from_dict(bkg_method, key, results, ref_models, ref_sourc
                     tested_model_str += (("" if j == 0 else " - ") + model_name[:-2])
                     center = SkyCoord(ra=model.spatial_model.lon_0.value * u.deg,dec=model.spatial_model.lat_0.value * u.deg, frame="icrs")
                     label=f"{model_name[:-2]}{label_methods}"
-                    i_color = j if len(bkg_methods) == 1 else j + 2*ibkg_method
                     if j==0:
                         fitted_alternative_model = results[bkg_method][res_key][tested_model][fit_method]['fit_result']
                         wilk_sig = get_nested_model_significance(fitted_null_model, fitted_alternative_model, False)
@@ -540,7 +545,7 @@ def plot_spatial_model_from_dict(bkg_method, key, results, ref_models, ref_sourc
                         else:
                             width_ellipse = sky_region.width.value/2
                             height_ellipse = sky_region.height.value/2
-                            label += f": width,heigth={width_ellipse:.2f}°,{height_ellipse:.2f}°"
+                            label += f": width,height={width_ellipse:.2f}°,{height_ellipse:.2f}°"
 
                         pixel_region.plot(ax=ax,
                                         color = colors[i_color],
@@ -548,6 +553,7 @@ def plot_spatial_model_from_dict(bkg_method, key, results, ref_models, ref_sourc
                                         ls = "-",
                                         label=label)
                     j+=1
+                    i_color+=1
                 i+=1
 
     ax.set_title(label=title+f"\n{tested_model_str}  ({label_wilk})",fontsize=fontsize)
@@ -561,11 +567,12 @@ def plot_spectra_from_models_dict(ax, results, ref_models, ref_source_name, ref_
         for ref_model_name in ref_models_to_plot:
             plot_ref(ax, ref_models, ref_source_name, ref_model_name, plot_type = "spectral")
     
-    bkg_methods = ['ring', 'FoV'] if bkg_methods_to_plot == ['all'] else bkg_methods_to_plot
-    fit_methods = ['stacked', 'joint'] if fit_methods_to_plot == ['all'] else fit_methods_to_plot
+    bkg_methods = ['ring', 'FoV'] if bkg_methods_to_plot is ['all'] else bkg_methods_to_plot
+    fit_methods = ['stacked', 'joint'] if fit_methods_to_plot is ['all'] else fit_methods_to_plot
     res_key = 'results' if 'results' in results[bkg_methods[0]].keys() else f'results_{analysis_dim}d'
-    tested_models = list(results[bkg_methods[0]][res_key].keys()) if results_to_plot == ['all'] else results_to_plot
+    tested_models = list(results[bkg_methods[0]][res_key].keys()) if results_to_plot is ['all'] else results_to_plot
     i=0
+    i_color=0
     for ibkg_method,bkg_method in enumerate(bkg_methods):
         for tested_model in tested_models:
             for fit_method in fit_methods:
@@ -577,7 +584,6 @@ def plot_spectra_from_models_dict(ax, results, ref_models, ref_source_name, ref_
                 if analysis_dim == 3:
                     n_bkg = 2 if fit_method == 'combined' else 1
                     for i_model, model in enumerate(results_model[:-n_bkg]):
-                        i_color = i_model if len(bkg_methods) == 1 else i_model + 2*ibkg_method
                         model_name = model.name
                         plot_kwargs = {
                             "energy_bounds": energy_bounds * u.TeV,
@@ -595,6 +601,7 @@ def plot_spectra_from_models_dict(ax, results, ref_models, ref_source_name, ref_
                             if (results[bkg_method][res_key][tested_model][fit_method][model_name]["flux_points_success"]):
                                 flux_points = results[bkg_method][res_key][tested_model][fit_method][model_name]["flux_points"]
                                 flux_points.plot(ax=ax, sed_type="e2dnde", color=colors[i_color], marker='o' if 'tail' in model_name else "x", markersize=5 if 'tail' in model_name else 7)
+                        i_color+=1
                 else:
                     model_name = tested_model
                     i_color = i
