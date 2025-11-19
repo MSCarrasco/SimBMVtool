@@ -92,6 +92,14 @@ def load_yaml(save_path:str):
         return path.exists()
 
 #-------------------------------------------------------------------------------------
+# Log
+#-------------------------------------------------------------------------------------
+
+def configure_logger(module='gammapy',level='DEBUG'):
+    logger = logging.getLogger(module)
+    logger.setLevel(logging.getLevelName(level.upper()))  
+
+#-------------------------------------------------------------------------------------
 # Observations
 #-------------------------------------------------------------------------------------
 
@@ -135,6 +143,7 @@ def get_obs_collection(dir_path,pattern,multiple_simulation_subdir=False,from_in
     path = Path(dir_path)
     paths = sorted(list(path.rglob(pattern)))
     obs_ids = None if (obs_ids.shape[0]==0) else obs_ids
+
     if not multiple_simulation_subdir:
         if not from_index:
             try: data_store = get_data_store(dir_path, '', from_index=True)
@@ -142,6 +151,8 @@ def get_obs_collection(dir_path,pattern,multiple_simulation_subdir=False,from_in
         else:  data_store = get_data_store(dir_path=dir_path, pattern=pattern, from_index=from_index)
         obs_collection = data_store.get_observations(obs_id=obs_ids, required_irf=['aeff','edisp'])
         
+        configure_logger(module='gammapy',level='ERROR')
+
         # Because DL3s from different experiments can have different names for hdus we need to check if some which are missing can be retrieved
         file_dirs = data_store.hdu_table['FILE_DIR'].astype(str).data
         for irf_filename in ['IRF_FILENAME','FILE_NAME']:
@@ -155,13 +166,16 @@ def get_obs_collection(dir_path,pattern,multiple_simulation_subdir=False,from_in
         for iobs, obs_id in enumerate(obs_ids):
             if (obs_collection[iobs].aeff is None) or (obs_collection[iobs].edisp is None) or (obs_collection[iobs].psf is None) or (obs_collection[iobs].bkg is None) or (obs_collection[iobs].gti is None):
                 try:
-                    irf_dict_path = str(irf_files[iobs]) if dir_path in str(irf_files[iobs]) else dir_path+'/'+ str(irf_files[iobs])
+                    irf_file = str(irf_files[iobs])
+                    if irf_file[:20]=="gammapy-datasets/2.0": irf_dict_path = os.environ.get('GAMMAPY_DATA')+irf_file[20:]
+                    else:
+                        irf_dict_path = irf_file if dir_path in irf_file else dir_path+'/'+ irf_file
                     irf_dict = load_irf_dict_from_file(irf_dict_path)
                     if (obs_collection[iobs].aeff is None) & ('aeff' in irf_dict): obs_collection[iobs].aeff = deepcopy(irf_dict['aeff'])
                     if (obs_collection[iobs].edisp is None) & ('edisp' in irf_dict): obs_collection[iobs].edisp = deepcopy(irf_dict['edisp'])
                     if (obs_collection[iobs].psf is None) & ('psf' in irf_dict): obs_collection[iobs].psf = deepcopy(irf_dict['psf'])
                     if (obs_collection[iobs].bkg is None) & ('bkg' in irf_dict): obs_collection[iobs].bkg = deepcopy(irf_dict['bkg'])
-                    if (obs_collection[iobs].gti is None) & ('gti' in irf_dict): obs_collection[iobs].bkg = deepcopy(irf_dict['gti'])
+                    if (obs_collection[iobs].gti is None) & ('gti' in irf_dict): obs_collection[iobs].gti = deepcopy(irf_dict['gti'])
                 except:
                     logger.info('Error when loading irf dictionnary')
     else:
@@ -174,11 +188,14 @@ def get_obs_collection(dir_path,pattern,multiple_simulation_subdir=False,from_in
             obs_collection[iobs].events.table.meta['OBS_ID'] = obs_id
             obs_collection[iobs].obs_id = obs_id
     
+    # configure_logger(module='gammapy',level='DEBUG')
+
     if with_datastore:
         return data_store, obs_collection
     else: 
         return obs_collection
     
+
 def get_run_info(path_data:str, pattern:str, obs_id:int):
     """returns array with [livetime,pointing_radec,file_name]"""
     loc = EarthLocation.of_site('Roque de los Muchachos')
@@ -211,7 +228,7 @@ def get_empty_obs_simu(Bkg_irf, axis_info, run_info, src_models, path_data:str,f
 
     if not isinstance(livetime, u.Quantity): livetime*=u.s
 
-    pointing_info = FixedPointingInfo(mode=PointingMode.POINTING, fixed_icrs=pointing)#,legacy_altaz=pointing_altaz)
+    pointing_info = FixedPointingInfo(fixed_icrs=pointing)#,legacy_altaz=pointing_altaz)
     t_ref=Time(t_ref_str)
     delay=t_delay*u.s
     # print(delay)
@@ -264,7 +281,7 @@ def get_empty_dataset_and_obs_simu(Bkg_irf, axis_info, run_info, src_models, pat
 
     if not isinstance(livetime, u.Quantity): livetime*=u.s
 
-    pointing_info = FixedPointingInfo(mode=PointingMode.POINTING, fixed_icrs=pointing)#,legacy_altaz=pointing_altaz)
+    pointing_info = FixedPointingInfo(fixed_icrs=pointing)#,legacy_altaz=pointing_altaz)
     t_ref=Time(t_ref_str)
     delay=t_delay*u.s
     # print(delay)

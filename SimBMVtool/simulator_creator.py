@@ -10,6 +10,7 @@ import numpy as np
 from copy import deepcopy
 
 import astropy.units as u
+from astropy import log
 
 from gammapy.datasets import MapDatasetEventSampler
 from gammapy.data import DataStore
@@ -38,14 +39,14 @@ class SimulatorCreator(BaseSimBMVtoolCreator):
             else: source_model = self.source
             for f in files:
                 Path(f).unlink()
-            
+            log.disable_warnings_logging()
             for wobble,run_info,random_state in zip(np.arange(self.n_wobbles)+1,self.wobble_run_info,self.wobble_seeds):
                 i = 0
                 if self.single_pointing and (wobble ==  2): break
                 print(f"---------- Wobble {wobble} ---------- ")
                 # Loop pour résolution temporelle. Paramètre "oversampling"
                 for iobs in range(1 if self.one_obs_per_wobble else self.n_run):
-                    print(iobs)
+                    print(f"---------- Observation {iobs} ----------")
                     events_all = None
                     oversampling = self.time_oversampling
                     obs_id = iobs + 1 + (1 if self.one_obs_per_wobble else self.n_run*(wobble-1))*(wobble > 1)
@@ -70,7 +71,7 @@ class SimulatorCreator(BaseSimBMVtoolCreator):
                     run_info_over = deepcopy(run_info)
                     run_info_over[3] = oversampling.to_value("s")
                     for j in range(n):
-                        print(j)
+                        print(f"Time oversampling {j+1}")
                         if self.true_collection: tdataset, tobs = get_empty_dataset_and_obs_simu(self.bkg_true_irf_collection[iobs],axis_info,run_info_over,source_model,self.path_data,self.flux_to_0,self.t_ref,i*self.delay+j*oversampling.to_value("s"),verbose=False)
                         else: tdataset, tobs = get_empty_dataset_and_obs_simu(self.bkg_true_irf,axis_info,run_info_over,source_model,self.path_data,self.flux_to_0,self.t_ref,i*self.delay+j*oversampling.to_value("s"),verbose=False)
                         tdataset.fake(random_state=random_state+iobs)
@@ -88,6 +89,7 @@ class SimulatorCreator(BaseSimBMVtoolCreator):
                     obs.write(f"{self.save_path}/obs_W{wobble}_{'0'*(obs_id<10)+'0'*(obs_id<100)}{obs_id}.fits",overwrite=True)
                     i+=1
             del(obs)
+            log.enable_warnings_logging()
             shutil.copyfile(self.config_path, f'{self.save_path}/config_simu.yaml')
             print(f"Simulation dir: {self.save_path}")
             path = Path(self.save_path) 

@@ -39,8 +39,6 @@ import pickle as pk
 import seaborn as sns
 from itertools import product
 
-import logging
-
 from IPython.display import display
 from gammapy.data import DataStore, FixedPointingInfo, Observation, observatory_locations, PointingMode
 from gammapy.datasets import MapDataset,MapDatasetEventSampler,Datasets,MapDatasetOnOff
@@ -80,9 +78,6 @@ from gammapy.datasets import MapDatasetEventSampler
 if gammapy_v == gammapy_custom: from gammapy.irf import Background3D, BackgroundIRF
 else: from gammapy.irf.background import Background3D, BackgroundIRF
 from gammapy.makers.utils import make_map_background_irf
-
-logger = logging.getLogger(__name__)
-
 
 class BaseSimBMVtoolCreator(ABC):
 
