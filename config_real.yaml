@@ -2,7 +2,6 @@
 paths:
   path_data: ./crab_LZA_data
   models: ./SimBMVtool/models.yaml
-  gammapy_catalog: ./gammapy-datasets/2.0/catalogs/gammacat/gammacat.fits.gz
   output_dir: ./outputs
   subdir: crab_LZA
 data:

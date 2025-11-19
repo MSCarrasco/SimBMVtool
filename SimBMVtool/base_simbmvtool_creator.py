@@ -130,8 +130,12 @@ class BaseSimBMVtoolCreator(ABC):
         if self.simulator: self.run_list = np.array([])
 
         # Source
+        try:
+            catalog = SourceCatalogGammaCat(os.environ.get('GAMMAPY_DATA')+'/catalogs/gammacat/gammacat.fits.gz')
+        except:
+            ValueError('No shell variable named GAMMAPY_DATA, please export path to gammapy-datasets')
+        
         self.source_name=self.cfg_source["catalog_name"]
-        catalog = SourceCatalogGammaCat(self.cfg_paths["gammapy_catalog"])
         if self.source_name in catalog.table['common_name']:
             self.source = catalog[self.source_name]
             self.source_pos=self.source.position
