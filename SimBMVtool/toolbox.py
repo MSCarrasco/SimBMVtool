@@ -504,7 +504,7 @@ def get_skymaps_dict(dataset, exclude_regions, exclude_regions_not_source, corre
     elif i_method==1: return maps_dataset
     else: return maps_high_level
 
-def plot_skymap_from_dict(skymaps, key, crop_width=0 * u.deg, ring_bkg_param=None, figsize=(5,5)):
+def plot_skymap_from_dict(skymaps, key, cutout_width=0 * u.deg, ring_bkg_param=None, figsize=(5,5)):
     skymaps_args = {
         'counts': {
             'cbar_label': 'events',
@@ -537,11 +537,8 @@ def plot_skymap_from_dict(skymaps, key, crop_width=0 * u.deg, ring_bkg_param=Non
     }
 
     skymap = skymaps[key]
-    if crop_width != 0 * u.deg:
-        width = 0.5 * skymap.geom.width[0][0]
-        binsize = width / (0.5 * skymap.data.shape[-1])
-        n_crop_px = int(((width - crop_width)/binsize).value)
-        skymap = skymap.crop(n_crop_px)
+    center_pos = SkyCoord(ra=skymap._geom.center_coord[0],dec=skymap._geom.center_coord[1],frame='icrs')
+    if cutout_width != 0 * u.deg: skymap = skymap.cutout(position=center_pos, width=cutout_width)
     
     cbar_label, title = (skymaps_args[key]["cbar_label"], skymaps_args[key]["title"])
     
@@ -572,11 +569,10 @@ def plot_skymap_from_dict(skymaps, key, crop_width=0 * u.deg, ring_bkg_param=Non
     if (ring_bkg_param is not None):
             if hasattr(ring_bkg_param,'__len__') & (len(ring_bkg_param)==2):
                 int_rad, width = ring_bkg_param
-                ring_center_pos = SkyCoord(ra=skymap._geom.center_coord[0],dec=skymap._geom.center_coord[1],frame='icrs')
-                r2 = SphericalCircle(ring_center_pos, int_rad * u.deg,
+                r2 = SphericalCircle(center_pos, int_rad * u.deg,
                                     edgecolor='white', facecolor='none',
                                     transform=ax.get_transform('icrs'))
-                r3 = SphericalCircle(ring_center_pos, int_rad * u.deg + width * u.deg,
+                r3 = SphericalCircle(center_pos, int_rad * u.deg + width * u.deg,
                                     edgecolor='white', facecolor='none',
                                     transform=ax.get_transform('icrs'))
                 ax.add_patch(r2)
@@ -592,7 +588,7 @@ def plot_significance_residuals(xlabel, lima_maps, title="", figsize=(11, 5), fo
     fig.delaxes(ax1)
     ax1 = fig.add_axes([0.1, 0.1, 0.8*width_left/3, 0.8], projection=skymap.geom.wcs)
     skymap.plot(cmap="coolwarm", add_cbar=True, vmin=-5, vmax=5, ax=ax1)
-    ax1.set_title(label='Significance residuals ', fontsize=fontsize-1)
+    ax1.set_title(label='Significance residuals ', fontsize=fontsize)
     residuals_distrib = lima_maps["sqrt_ts"].data.flatten()
     distribution = residuals_distrib[~np.isnan(residuals_distrib) & (residuals_distrib != 0)]
     
@@ -639,13 +635,13 @@ def plot_significance_residuals(xlabel, lima_maps, title="", figsize=(11, 5), fo
     sns.histplot(x=distribution, bins=n_bins, ax=ax, element='step', fill=False, stat=stat, color='cornflowerblue', label='Distribution')
     
     # Set plot labels and title
-    ax.set_xlabel(xlabel=xlabel, fontsize=fontsize-2)
-    ax.set_ylabel(ylabel=stat.capitalize(), fontsize=fontsize-2)
+    ax.set_xlabel(xlabel=xlabel)
+    ax.set_ylabel(ylabel=stat.capitalize())
     
-    ax.legend(loc='upper center', frameon=False, fontsize=fontsize-1)
+    ax.legend(loc='upper center', frameon=False, fontsize=fontsize)
     ax.set(ylim=[0, 0.6])
-    ax.set_title(label='Fitted distribution', fontsize=fontsize-1)
-    plt.suptitle(t=title, fontsize=fontsize)
+    ax.set_title(label='Fitted distribution', fontsize=fontsize)
+    plt.suptitle(t=title, fontsize=fontsize+2)
     # Save plot if needed
     if save_plot:
         fig.savefig(f'/gaussfit_{xlabel}.png')
@@ -755,8 +751,10 @@ def compute_residuals(out, true, residuals='diff/true',res_lim_for_nan=1., norm_
         elif residuals == "diff/sqrt(true)": res = diff / np.sqrt(true[iEbin,:,:])
         elif residuals == "diff/sqrt(out)": res = diff / np.sqrt(out[iEbin,:,:])
 
-        # res[true[iEbin,:,:] == 0] = np.nan
-        res_arr[iEbin,:,:] += res * np.sqrt(N)
+        res_arr += res
+
+        if iEbin==0: print("Maximum residuals value in energy bin:")
+        print(f"{iEbin}: {np.nanmax(np.abs(res))}")
     return res_arr
 
 def distance(x, y, x0, y0):
