@@ -18,9 +18,7 @@ from bkg_irf import (evaluate_bkg,
 import gammapy
 gammapy_v = gammapy.__version__
 gammapy_custom = '0.8.dev17165+g9e45af09c.d20241210'
-from gammapy.data import Observations, PointingMode
-if gammapy_v == gammapy_custom:
-    from gammapy.data import ObservationMetaData
+from gammapy.data import Observations, PointingMode, ObservationMetaData
 import math
 import numpy as np
 import astropy.units as u
@@ -78,6 +76,28 @@ from gammapy.datasets import MapDatasetEventSampler
 if gammapy_v == gammapy_custom: from gammapy.irf import Background3D, BackgroundIRF
 else: from gammapy.irf.background import Background3D, BackgroundIRF
 from gammapy.makers.utils import make_map_background_irf
+
+
+# Site locations for main gamma-ray experiments
+
+HESS = EarthLocation(lat=-23.271667*u.deg, lon=16.5*u.deg, height=1800*u.m)
+VERITAS = EarthLocation(lat=31.6750*u.deg, lon=-110.9519*u.deg, height=1268*u.m)
+CTAN = EarthLocation(lat=28.761944*u.deg, lon=-17.890556*u.deg, height=2190*u.m)
+CTAS = EarthLocation(lat=-24.683333*u.deg, lon=-70.3*u.deg, height=2150*u.m)
+HAWC = EarthLocation(lat=18.994722*u.deg, lon=-97.308611*u.deg, height=4100*u.m)
+LHAASO = EarthLocation(lat=29.358611*u.deg, lon=100.154167*u.deg, height=4410*u.m)
+AUGER = EarthLocation(lat=-35.103333*u.deg, lon=-69.5*u.deg, height=1400*u.m)
+
+sites = {
+    "HESS": HESS,
+    "VERITAS": VERITAS,
+    "CTAN": CTAN,
+    "CTAS": CTAS,
+    "HAWC": HAWC,
+    "LHAASO": LHAASO,
+    "AUGER": AUGER,
+}
+
 
 class BaseSimBMVtoolCreator(ABC):
 
@@ -206,10 +226,9 @@ class BaseSimBMVtoolCreator(ABC):
         self.axis_info_map = [self.e_min, self.e_max, self.size_fov_acc, 10 * self.nbin_offset_acc]
 
         # Simulation
-        self.loc = EarthLocation.of_site('Roque de los Muchachos')
-        self.location = observatory_locations["cta_north"]
-        
+
         if self.simulator or not self.external_data:
+            self.loc = EarthLocation.of_site(self.cfg_simulation['earthlocation_obs_site'])
             self.t_ref = self.cfg_simulation["t_ref"]
             self.delay = self.cfg_simulation["delay"]
             self.time_oversampling = self.cfg_simulation["time_oversampling"] * u.s
@@ -512,18 +531,33 @@ class BaseSimBMVtoolCreator(ABC):
             if self.real_data:
                 # Add telescope position to observations
                 for iobs in range(len(self.obs_collection)):
-                    meta_dict = self.obs_collection[iobs].events.table.meta
-                    meta_dict.__setitem__('GEOLON',str(self.loc.lon.value))
-                    meta_dict.__setitem__('GEOLAT',str(self.loc.lat.value))
-                    meta_dict.__setitem__('GEOALT',str(self.loc.height.to_value(u.m)))
-                    meta_dict.__setitem__('deadtime_fraction',str(1-meta_dict['DEADC']))
-                    if gammapy_v == gammapy_custom:
+                    if self.obs_collection[iobs]._meta is None:
+                        meta_dict = self.obs_collection[iobs].events.table.meta
+                        if ('CTA' in meta_dict['TELESCOP']) or ('LST-1' in meta_dict['TELESCOP']) or ('MAGIC' in meta_dict['TELESCOP']):
+                            self.loc = EarthLocation.of_site('Roque de los Muchachos')
+                        elif ('HESS' in meta_dict['TELESCOP']) or ('H.E.S.S' in meta_dict['TELESCOP']):
+                            self.loc = HESS
+                        elif ('VERITAS' in meta_dict['TELESCOP']):
+                            self.loc = VERITAS
+                        elif ('HAWC' in meta_dict['TELESCOP']):
+                            self.loc = HAWC
+                        elif ('LHAASO' in meta_dict['TELESCOP']):
+                            self.loc = LHAASO
+                        elif ('AUGER' in meta_dict['TELESCOP']):
+                            self.loc = AUGER
+
+                        meta_dict.__setitem__('GEOLON',str(self.loc.lon.value))
+                        meta_dict.__setitem__('GEOLAT',str(self.loc.lat.value))
+                        meta_dict.__setitem__('GEOALT',str(self.loc.height.to_value(u.m)))
+                        meta_dict.__setitem__('deadtime_fraction',str(1-meta_dict['DEADC']))
+                        
                         self.obs_collection[iobs]._meta = ObservationMetaData.from_header(meta_dict)
-                    else:
-                        self.obs_collection[iobs].events.meta = meta_dict
-                    self.obs_collection[iobs]._location = self.loc
-                    self.obs_collection[iobs].pointing._location = self.loc
-                    # self.obs_collection[iobs].obs_info['observatory_earth_location'] = self.loc # <- modifié pour être accessible à l'intérieur de la méthode qui récupère le pointé
+                        # Sometimes the assignation does not work
+                        if self.obs_collection[iobs]._meta is None:
+                            self.obs_collection[iobs].events.meta = meta_dict
+                        self.obs_collection[iobs]._location = self.loc
+                        self.obs_collection[iobs].pointing._location = self.loc
+                        # self.obs_collection[iobs].obs_info['observatory_earth_location'] = self.loc # <- modifié pour être accessible à l'intérieur de la méthode qui récupère le pointé
             self.dfobs_table["WOBBLE"] = get_unique_wobble_pointings(self.obs_collection)
             self.wobble_mean_pointings = []
             for wobble in self.dfobs_table.WOBBLE.unique():
