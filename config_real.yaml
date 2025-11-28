@@ -1,8 +1,7 @@
 ---
 paths:
-  path_data: ./crab_LZA_data
+  path_data: /Users/carrasco/Prog/gammapy/data/crab_LZA_simbmvtool #./crab_LZA_data
   models: ./SimBMVtool/models.yaml
-  gammapy_catalog: ./gammapy-extra/datasets/catalogs/gammacat/gammacat.fits.gz
   output_dir: ./outputs
   subdir: crab_LZA
 data:
@@ -17,6 +16,7 @@ source:
     dec: 22.0145
   exclusion_region:
     shape: n_shapes # n_shapes, noexclusion
+    safe_radius_from_map_center: 2
     regions:
       circle_1:                               # Crab
         radius: 0.1

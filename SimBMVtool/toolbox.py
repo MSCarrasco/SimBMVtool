@@ -92,6 +92,14 @@ def load_yaml(save_path:str):
         return path.exists()
 
 #-------------------------------------------------------------------------------------
+# Log
+#-------------------------------------------------------------------------------------
+
+def configure_logger(module='gammapy',level='DEBUG'):
+    logger = logging.getLogger(module)
+    logger.setLevel(logging.getLevelName(level.upper()))  
+
+#-------------------------------------------------------------------------------------
 # Observations
 #-------------------------------------------------------------------------------------
 
@@ -135,6 +143,7 @@ def get_obs_collection(dir_path,pattern,multiple_simulation_subdir=False,from_in
     path = Path(dir_path)
     paths = sorted(list(path.rglob(pattern)))
     obs_ids = None if (obs_ids.shape[0]==0) else obs_ids
+
     if not multiple_simulation_subdir:
         if not from_index:
             try: data_store = get_data_store(dir_path, '', from_index=True)
@@ -142,6 +151,8 @@ def get_obs_collection(dir_path,pattern,multiple_simulation_subdir=False,from_in
         else:  data_store = get_data_store(dir_path=dir_path, pattern=pattern, from_index=from_index)
         obs_collection = data_store.get_observations(obs_id=obs_ids, required_irf=['aeff','edisp'])
         
+        configure_logger(module='gammapy',level='ERROR')
+
         # Because DL3s from different experiments can have different names for hdus we need to check if some which are missing can be retrieved
         file_dirs = data_store.hdu_table['FILE_DIR'].astype(str).data
         for irf_filename in ['IRF_FILENAME','FILE_NAME']:
@@ -155,13 +166,16 @@ def get_obs_collection(dir_path,pattern,multiple_simulation_subdir=False,from_in
         for iobs, obs_id in enumerate(obs_ids):
             if (obs_collection[iobs].aeff is None) or (obs_collection[iobs].edisp is None) or (obs_collection[iobs].psf is None) or (obs_collection[iobs].bkg is None) or (obs_collection[iobs].gti is None):
                 try:
-                    irf_dict_path = str(irf_files[iobs]) if dir_path in str(irf_files[iobs]) else dir_path+'/'+ str(irf_files[iobs])
+                    irf_file = str(irf_files[iobs])
+                    if irf_file[:20]=="gammapy-datasets/2.0": irf_dict_path = os.environ.get('GAMMAPY_DATA')+irf_file[20:]
+                    else:
+                        irf_dict_path = irf_file if dir_path in irf_file else dir_path+'/'+ irf_file
                     irf_dict = load_irf_dict_from_file(irf_dict_path)
                     if (obs_collection[iobs].aeff is None) & ('aeff' in irf_dict): obs_collection[iobs].aeff = deepcopy(irf_dict['aeff'])
                     if (obs_collection[iobs].edisp is None) & ('edisp' in irf_dict): obs_collection[iobs].edisp = deepcopy(irf_dict['edisp'])
                     if (obs_collection[iobs].psf is None) & ('psf' in irf_dict): obs_collection[iobs].psf = deepcopy(irf_dict['psf'])
                     if (obs_collection[iobs].bkg is None) & ('bkg' in irf_dict): obs_collection[iobs].bkg = deepcopy(irf_dict['bkg'])
-                    if (obs_collection[iobs].gti is None) & ('gti' in irf_dict): obs_collection[iobs].bkg = deepcopy(irf_dict['gti'])
+                    if (obs_collection[iobs].gti is None) & ('gti' in irf_dict): obs_collection[iobs].gti = deepcopy(irf_dict['gti'])
                 except:
                     logger.info('Error when loading irf dictionnary')
     else:
@@ -174,11 +188,14 @@ def get_obs_collection(dir_path,pattern,multiple_simulation_subdir=False,from_in
             obs_collection[iobs].events.table.meta['OBS_ID'] = obs_id
             obs_collection[iobs].obs_id = obs_id
     
+    # configure_logger(module='gammapy',level='DEBUG')
+
     if with_datastore:
         return data_store, obs_collection
     else: 
         return obs_collection
     
+
 def get_run_info(path_data:str, pattern:str, obs_id:int):
     """returns array with [livetime,pointing_radec,file_name]"""
     loc = EarthLocation.of_site('Roque de los Muchachos')
@@ -211,7 +228,7 @@ def get_empty_obs_simu(Bkg_irf, axis_info, run_info, src_models, path_data:str,f
 
     if not isinstance(livetime, u.Quantity): livetime*=u.s
 
-    pointing_info = FixedPointingInfo(mode=PointingMode.POINTING, fixed_icrs=pointing)#,legacy_altaz=pointing_altaz)
+    pointing_info = FixedPointingInfo(fixed_icrs=pointing)#,legacy_altaz=pointing_altaz)
     t_ref=Time(t_ref_str)
     delay=t_delay*u.s
     # print(delay)
@@ -264,7 +281,7 @@ def get_empty_dataset_and_obs_simu(Bkg_irf, axis_info, run_info, src_models, pat
 
     if not isinstance(livetime, u.Quantity): livetime*=u.s
 
-    pointing_info = FixedPointingInfo(mode=PointingMode.POINTING, fixed_icrs=pointing)#,legacy_altaz=pointing_altaz)
+    pointing_info = FixedPointingInfo(fixed_icrs=pointing)#,legacy_altaz=pointing_altaz)
     t_ref=Time(t_ref_str)
     delay=t_delay*u.s
     # print(delay)
@@ -487,7 +504,7 @@ def get_skymaps_dict(dataset, exclude_regions, exclude_regions_not_source, corre
     elif i_method==1: return maps_dataset
     else: return maps_high_level
 
-def plot_skymap_from_dict(skymaps, key, crop_width=0 * u.deg, ring_bkg_param=None, figsize=(5,5)):
+def plot_skymap_from_dict(skymaps, key, cutout_width=0 * u.deg, ring_bkg_param=None, figsize=(5,5)):
     skymaps_args = {
         'counts': {
             'cbar_label': 'events',
@@ -520,11 +537,8 @@ def plot_skymap_from_dict(skymaps, key, crop_width=0 * u.deg, ring_bkg_param=Non
     }
 
     skymap = skymaps[key]
-    if crop_width != 0 * u.deg:
-        width = 0.5 * skymap.geom.width[0][0]
-        binsize = width / (0.5 * skymap.data.shape[-1])
-        n_crop_px = int(((width - crop_width)/binsize).value)
-        skymap = skymap.crop(n_crop_px)
+    center_pos = SkyCoord(ra=skymap._geom.center_coord[0],dec=skymap._geom.center_coord[1],frame='icrs')
+    if cutout_width != 0 * u.deg: skymap = skymap.cutout(position=center_pos, width=cutout_width)
     
     cbar_label, title = (skymaps_args[key]["cbar_label"], skymaps_args[key]["title"])
     
@@ -555,11 +569,10 @@ def plot_skymap_from_dict(skymaps, key, crop_width=0 * u.deg, ring_bkg_param=Non
     if (ring_bkg_param is not None):
             if hasattr(ring_bkg_param,'__len__') & (len(ring_bkg_param)==2):
                 int_rad, width = ring_bkg_param
-                ring_center_pos = SkyCoord(ra=skymap._geom.center_coord[0],dec=skymap._geom.center_coord[1],frame='icrs')
-                r2 = SphericalCircle(ring_center_pos, int_rad * u.deg,
+                r2 = SphericalCircle(center_pos, int_rad * u.deg,
                                     edgecolor='white', facecolor='none',
                                     transform=ax.get_transform('icrs'))
-                r3 = SphericalCircle(ring_center_pos, int_rad * u.deg + width * u.deg,
+                r3 = SphericalCircle(center_pos, int_rad * u.deg + width * u.deg,
                                     edgecolor='white', facecolor='none',
                                     transform=ax.get_transform('icrs'))
                 ax.add_patch(r2)
@@ -575,7 +588,7 @@ def plot_significance_residuals(xlabel, lima_maps, title="", figsize=(11, 5), fo
     fig.delaxes(ax1)
     ax1 = fig.add_axes([0.1, 0.1, 0.8*width_left/3, 0.8], projection=skymap.geom.wcs)
     skymap.plot(cmap="coolwarm", add_cbar=True, vmin=-5, vmax=5, ax=ax1)
-    ax1.set_title(label='Significance residuals ', fontsize=fontsize-1)
+    ax1.set_title(label='Significance residuals ', fontsize=fontsize)
     residuals_distrib = lima_maps["sqrt_ts"].data.flatten()
     distribution = residuals_distrib[~np.isnan(residuals_distrib) & (residuals_distrib != 0)]
     
@@ -622,13 +635,13 @@ def plot_significance_residuals(xlabel, lima_maps, title="", figsize=(11, 5), fo
     sns.histplot(x=distribution, bins=n_bins, ax=ax, element='step', fill=False, stat=stat, color='cornflowerblue', label='Distribution')
     
     # Set plot labels and title
-    ax.set_xlabel(xlabel=xlabel, fontsize=fontsize-2)
-    ax.set_ylabel(ylabel=stat.capitalize(), fontsize=fontsize-2)
+    ax.set_xlabel(xlabel=xlabel)
+    ax.set_ylabel(ylabel=stat.capitalize())
     
-    ax.legend(loc='upper center', frameon=False, fontsize=fontsize-1)
+    ax.legend(loc='upper center', frameon=False, fontsize=fontsize)
     ax.set(ylim=[0, 0.6])
-    ax.set_title(label='Fitted distribution', fontsize=fontsize-1)
-    plt.suptitle(t=title, fontsize=fontsize)
+    ax.set_title(label='Fitted distribution', fontsize=fontsize)
+    plt.suptitle(t=title, fontsize=fontsize+2)
     # Save plot if needed
     if save_plot:
         fig.savefig(f'/gaussfit_{xlabel}.png')
@@ -738,8 +751,10 @@ def compute_residuals(out, true, residuals='diff/true',res_lim_for_nan=1., norm_
         elif residuals == "diff/sqrt(true)": res = diff / np.sqrt(true[iEbin,:,:])
         elif residuals == "diff/sqrt(out)": res = diff / np.sqrt(out[iEbin,:,:])
 
-        # res[true[iEbin,:,:] == 0] = np.nan
-        res_arr[iEbin,:,:] += res * np.sqrt(N)
+        res_arr += res
+
+        if iEbin==0: print("Maximum residuals value in energy bin:")
+        print(f"{iEbin}: {np.nanmax(np.abs(res))}")
     return res_arr
 
 def distance(x, y, x0, y0):

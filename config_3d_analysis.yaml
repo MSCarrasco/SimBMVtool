@@ -1,7 +1,6 @@
 ---
 paths:
-  path_data: ./gammapy-extra/datasets/hess-dl3-dr1/data # Path to dl3 files containing the full-enclosure IRFs
-  gammapy_catalog: ./gammapy-extra/datasets/catalogs/gammacat/gammacat.fits.gz 
+  path_data: ./gammapy-datasets/2.0/hess-dl3-dr1/data # Path to dl3 files containing the full-enclosure IRFs
   models: ./SimBMVtool/models.yaml
   output_dir: ./outputs
   subdir: msh1552_hess
