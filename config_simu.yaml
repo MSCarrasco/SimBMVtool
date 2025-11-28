@@ -23,6 +23,7 @@ wobbles:                                      # Add or remove the wobbles you wa
     run: 23592
     seed: 666
 simulation:
+  earthlocation_obs_site: Roque de los Muchachos
   n_run: 2                                    # per wobble
   livetime: 600                               # [s]
   single_pointing: False                      # If true, only W1 observations are simulated (this is useful for tests)
@@ -58,7 +59,7 @@ source:
                       {'name': 'frame', 'value': icrs}]
   exclusion_region:
     shape: noexclusion                          # n_shapes, noexclusion.
-    safe_radius_from_map_center: 1.5           # [deg]
+    safe_radius_from_map_center: 3           # [deg]
     regions:
       circle_1:                              # Shapes can be circle, ellipse or ractangle, with SkyRegion parameters
         radius: 0.3
